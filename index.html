@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ME<333｜跳舞影片自動置中</title>
+<title>ME<333｜影片人物自動置中</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Anton&family=Noto+Sans+TC:wght@400;500;700;900&display=swap" rel="stylesheet">
@@ -197,7 +197,6 @@
     <div class="brand">
       <div>
         <h1 class="wordmark">ME&lt;333<sup>*</sup></h1>
-        <p>跳舞影片自動把你放在畫面中間</p>
       </div>
     </div>
     <div id="status" role="status">模型載入中…</div>
@@ -207,12 +206,12 @@
   <div class="topbar">
     <ol class="steps">
       <li class="now"><span>1</span>選影片</li>
-      <li><span>2</span>點選自己</li>
+      <li><span>2</span>點選人物</li>
       <li><span>3</span>調整畫面</li>
       <li><span>4</span>輸出</li>
     </ol>
     <div class="toolbar">
-      <button id="pickBtn" class="btn">點選我自己</button>
+      <button id="pickBtn" class="btn">點選要追蹤的人</button>
       <label for="picker" class="btn">換一支影片</label>
       <span id="fileName"></span>
     </div>
@@ -221,8 +220,8 @@
   <main>
     <!-- 還沒選影片時的拖放區 -->
     <label id="dropzone" for="picker">
-      <strong>把跳舞影片拖進來 *</strong>
-      <span>多人一起跳也可以，等一下點選你自己就好</span>
+      <strong>把影片拖進來 *</strong>
+      <span>跳舞、偶像影片都可以，多人同框時點一下想追蹤的人就好</span>
       <span class="btn primary pick">選擇影片</span>
       <small>影片只在你的電腦上處理，不會上傳到任何地方</small>
     </label>
@@ -302,7 +301,7 @@
         <button id="exportBtn" class="btn primary big">輸出影片</button>
         <div class="progress"><div id="progressBar"></div></div>
         <a id="download" class="btn" hidden>下載置中影片</a>
-        <p class="note">從你點選自己的那一刻開始輸出到結尾，會一格一格處理，請等進度跑完。</p>
+        <p class="note">從點選人物的那一刻開始輸出到結尾，會一格一格處理，請等進度跑完。</p>
       </section>
     </aside>
   </main>
@@ -343,7 +342,7 @@ function loadFile(file) {
   document.getElementById("fileName").textContent = file.name;
   document.getElementById("download").hidden = true;
   setStep(2);
-  status.textContent = "暫停在看得到你的畫面，按「點選我自己」";
+  status.textContent = "暫停在看得到那個人的畫面，按「點選要追蹤的人」";
 }
 document.getElementById("picker").addEventListener("change", e => loadFile(e.target.files[0]));
 const drop = document.getElementById("dropzone");
@@ -654,7 +653,7 @@ document.getElementById("pickBtn").addEventListener("click", () => {
   target = null;
   draw();
   stage.classList.add("picking");
-  status.textContent = "在左邊畫面點一下你自己";
+  status.textContent = "在左邊畫面點一下想追蹤的人";
 });
 
 canvas.addEventListener("click", (e) => {

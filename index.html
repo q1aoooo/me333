@@ -181,6 +181,10 @@
   .keys .key button + button { border-left: 2px solid var(--ink); font-weight: 700; }
   .keys .key button:hover { background: var(--soft); }
   .keys .empty { color: var(--muted); font-size: 13px; }
+  .keys .key.pick { background: var(--ink); }
+  .keys .key.pick button { color: var(--paper); }
+  .keys .key.pick button + button { border-left-color: var(--paper); }
+  .keys .key.pick button:hover { background: #333; }
   #preview { cursor: ns-resize; touch-action: none; }   /* 可以在預覽上拖曳調整上下 */
 
   /* ===== 小螢幕 ===== */
@@ -285,7 +289,7 @@
           <h3 style="margin:0">手動關鍵影格</h3>
           <button id="addKey" class="btn small">＋ 加在這裡</button>
         </div>
-        <p class="hint-line">人物還沒出現、還沒開始追蹤的片段，畫面會照這裡的關鍵影格移動。暫停後在預覽畫面上拖曳，調好位置再按「加在這裡」</p>
+        <p class="hint-line">人物還沒出現或跟丟的片段，畫面會照這裡的關鍵影格移動，沒有關鍵影格就停在原地。暫停後在預覽畫面上拖曳，調好位置再按「加在這裡」</p>
         <div id="keyList" class="keys"></div>
       </section>
 
@@ -364,7 +368,7 @@ function loadFile(file) {
   if (!file || !file.type.startsWith("video")) { status.textContent = "請選擇影片檔"; return; }
   video.src = URL.createObjectURL(file);
   currentFile = file;   // 記住原始檔，輸出時要拿聲音
-  target = null; picked = null;
+  target = null; picks = []; activePick = -1; lostSince = null; lostCam = null;
   keyframes = []; manualEdit = false; renderKeys();   // 換影片就清空關鍵影格
   document.body.classList.add("has-video");
   document.getElementById("fileName").textContent = file.name;
@@ -579,13 +583,26 @@ preview.addEventListener("pointermove", e => {
 preview.addEventListener("pointerup", () => { dragFrom = null; });
 
 // ===== 手動關鍵影格 =====
+// 有選人、而且目前沒有跟丟，才算「正在追蹤」
 function isTrackingNow() {
-  return !!target && (!picked || video.currentTime >= picked.time - 0.001);
+  return activePick >= 0 && !!target && lostSince === null;
+}
+
+// 沒在追蹤時，鏡頭該在哪裡：
+// ‧ 還沒選人的片段：照這段時間裡的關鍵影格走
+// ‧ 跟丟的片段：從跟丟那一刻的位置出發，照之後的關鍵影格走；沒有關鍵影格就停在原地
+function manualCamAt(t) {
+  const segStart = activePick < 0 ? 0 : lostSince;
+  const next = picks.find(p => p.time > t + 0.001);
+  const segEnd = next ? next.time : Infinity;
+  const keys = keyframes.filter(k => k.t >= segStart - 0.001 && k.t < segEnd);
+  const path = (activePick >= 0 && lostCam) ? [{ t: lostSince, x: lostCam.x, y: lostCam.y }, ...keys] : keys;
+  if (!path.length) return null;   // 沒有關鍵影格：鏡頭維持不動
+  return keyframeAt(t, path);
 }
 
 // 找出這個時間點的鏡頭位置：在兩個關鍵影格之間平滑地過渡（先慢、中間快、再慢）
-function keyframeAt(t) {
-  const k = keyframes;
+function keyframeAt(t, k = keyframes) {
   if (t <= k[0].t) return k[0];
   if (t >= k[k.length - 1].t) return k[k.length - 1];
   let i = 0;
@@ -604,7 +621,16 @@ function fmtTime(t) {
 // 顯示關鍵影格列表：點時間跳過去，點 × 刪掉
 function renderKeys() {
   const list = document.getElementById("keyList");
-  list.innerHTML = keyframes.length ? "" : '<span class="empty">還沒有關鍵影格</span>';
+  list.innerHTML = (keyframes.length || picks.length) ? "" : '<span class="empty">還沒有關鍵影格</span>';
+  // 選人的時間點也列出來（黑底），可以跳過去或刪掉
+  picks.forEach((pk, i) => {
+    const el = document.createElement("span");
+    el.className = "key pick";
+    el.innerHTML = `<button title="在這裡選了人">選人 ${fmtTime(pk.time)}</button><button aria-label="刪除">×</button>`;
+    el.children[0].onclick = () => { video.pause(); video.currentTime = pk.time; };
+    el.children[1].onclick = () => { picks.splice(i, 1); activePick = -2; syncPick(video.currentTime); renderKeys(); refreshIfPaused(); };
+    list.appendChild(el);
+  });
   keyframes.forEach((kf, i) => {
     const el = document.createElement("span");
     el.className = "key";
@@ -628,7 +654,12 @@ document.getElementById("addKey").addEventListener("click", () => {
 
 // 播放或跳到別的時間，就結束「正在手動調整」的狀態
 video.addEventListener("play", () => { manualEdit = false; });
-video.addEventListener("seeked", () => { if (!exporting) manualEdit = false; });
+video.addEventListener("seeked", () => {
+  if (exporting) return;
+  manualEdit = false;
+  // 往回跳到跟丟之前的時間，就先當作還沒跟丟，重新找人
+  if (lostSince !== null && video.currentTime < lostSince) { lostSince = null; lostCam = null; lostCount = 0; }
+});
 
 filterAmtEl.addEventListener("input", refreshIfPaused);
 
@@ -680,9 +711,9 @@ function renderPreview() {
     // 平滑：每一格只往目標移動一小段，數字越大跟得越快、越不平滑
     cam.x += (target.x - cam.x) * k;
     if (followYEl.checked) cam.y += (target.y - cam.y) * k;
-  } else if (keyframes.length && !manualEdit) {
-    const p = keyframeAt(video.currentTime);
-    cam.x = p.x; cam.y = p.y;
+  } else if (!manualEdit) {
+    const p = manualCamAt(video.currentTime);   // 照手動關鍵影格走，沒有就停在原地
+    if (p) { cam.x = p.x; cam.y = p.y; }
   }
 
   // 先依比例框出範圍，再依放大倍率縮小
@@ -735,7 +766,10 @@ let lostCount = 0;   // 連續幾次沒找到人
 let keyframes = [];    // 手動關鍵影格：{ t: 秒數, x, y: 鏡頭位置 }
 let manualEdit = false; // 正在手動拖曳調整鏡頭（還沒存成關鍵影格）
 let lastCrop = { fw: 1, fh: 1 };
-let wasBefore = false;  // 上一格是不是還在點選人物之前
+// 跟丟的狀態：連續幾次都找不到才算真的跟丟，避免偶爾漏一格就亂動
+const LOST_GRACE = 6;
+let lostSince = null;   // 從哪個時間點開始跟丟
+let lostCam = null;     // 跟丟那一刻鏡頭的位置（畫面會停在這裡）
 
 let people = [];   // 這一格偵測到的所有人
 
@@ -753,9 +787,8 @@ function findTarget() {
     const cost = moved + 0.7 * sizeDiff;
     if (cost < bestCost) { bestCost = cost; best = i; }
   });
-  // 跟丟一陣子後，放寬一點條件，讓它比較容易重新找回來
-  const limit = MATCH_LIMIT * (lostCount > 5 ? 1.8 : 1);
-  return bestCost < limit ? best : -1;
+  // 鎖定：就算跟丟也不放寬條件，只接受在最後位置附近、大小也差不多的人
+  return bestCost < MATCH_LIMIT ? best : -1;
 }
 
 // 更新追蹤的位置：只往新位置靠近一部分，濾掉骨架的小抖動
@@ -778,8 +811,8 @@ function detect() {
 
 function draw() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  // 還沒到點選人物的時間點，就不追蹤（避免抓到別人）
-  const allowTrack = !picked || video.currentTime >= picked.time - 0.001;
+  // 只在有選人的片段追蹤，而且只找「同一個人」，不會改跟別人
+  const allowTrack = activePick >= 0;
   const idx = allowTrack ? findTarget() : -1;
   people.forEach((lm, i) => {
     const isTarget = i === idx;
@@ -790,6 +823,7 @@ function draw() {
   if (idx >= 0) {
     updateTarget(people[idx]);   // 平滑地更新位置，下一格用
     lostCount = 0;
+    if (lostSince !== null) { lostSince = null; lostCam = null; status.textContent = "找回來了"; }   // 人回來了，繼續追蹤
     ctx.fillStyle = "#111111";
     ctx.strokeStyle = "#FFFFFF";
     ctx.lineWidth = 4;
@@ -799,8 +833,13 @@ function draw() {
     ctx.stroke();
   } else if (target && allowTrack) {
     lostCount++;
-    target.vx *= 0.5; target.vy *= 0.5;   // 跟丟時先停在原地附近等他出現
-    if (lostCount > 15) status.textContent = "跟丟了，可以暫停後重新選人";
+    target.vx = 0; target.vy = 0;   // 找不到時停在最後看到的位置，等他在附近重新出現
+    if (lostCount > LOST_GRACE && lostSince === null) {
+      // 真的跟丟了：畫面停在原地，可以用手動關鍵影格決定這段怎麼走
+      lostSince = video.currentTime;
+      lostCam = { x: cam.x, y: cam.y };
+      status.textContent = `${fmtTime(lostSince)} 跟丟了：畫面會停在原地，可以加手動關鍵影格，或重新點選人物`;
+    }
   }
 }
 
@@ -825,10 +864,15 @@ canvas.addEventListener("click", (e) => {
     if (d < bestD) { bestD = d; best = makeTarget(lm); }   // 記住位置和身體大小
   });
   if (best) {
-    target = best;
-    lostCount = 0;
+    // 加入一筆選人紀錄（同一個時間點就覆蓋），之後的片段就鎖定這個人
+    const t = video.currentTime;
+    picks = picks.filter(p => Math.abs(p.time - t) > 0.05);
+    picks.push({ time: t, pos: { ...best } });
+    picks.sort((a, b) => a.time - b.time);
+    activePick = -2;          // 強制重新同步
+    syncPick(t);
     cam = { x: best.x, y: best.y };   // 選好人時鏡頭直接對準，不用慢慢滑過去
-    picked = { time: video.currentTime, pos: { ...best } };   // 記住在哪個時間點選了誰，輸出時從這裡開始
+    renderKeys();
     stage.classList.remove("picking");
     status.textContent = "選好了，播放看看預覽";
     setStep(3);
@@ -841,7 +885,28 @@ canvas.addEventListener("click", (e) => {
 // 不再邊播邊錄，而是一格一格處理：跳到那一格 → 偵測 → 置中、濾鏡 → 交給編碼器
 // 比較慢，但每一格都一定會被處理到，輸出的影片不會卡
 const FPS = 30;          // 輸出的每秒格數
-let picked = null;       // { time: 選人的時間, pos: 當時的位置 }
+// 可以在不同時間點重新選人：每一筆是 { time: 選人的時間, pos: 當時的位置 }
+let picks = [];
+let activePick = -1;     // 目前時間用的是第幾筆選人（-1 代表還沒選人）
+
+// 找出某個時間點該用哪一次選人：用「時間在它之前、最近的那一次」
+function pickIndexAt(t) {
+  let idx = -1;
+  picks.forEach((p, i) => { if (p.time <= t + 0.001) idx = i; });
+  return idx;
+}
+
+// 換到新的選人區段時，從那次選人的位置重新開始鎖定
+function syncPick(t) {
+  const idx = pickIndexAt(t);
+  if (idx !== activePick) {
+    activePick = idx;
+    target = idx >= 0 ? { ...picks[idx].pos } : null;
+    lostCount = 0;
+    lostSince = null;
+    lostCam = null;
+  }
+}
 let exporting = false;   // 輸出中時，暫停一般的預覽更新
 let currentFile = null;  // 原始影片檔，拿聲音用
 
@@ -854,7 +919,7 @@ function seekTo(t) {
   });
 }
 
-function start0() { return picked ? picked.time : 0; }
+function start0() { return picks.length ? picks[0].time : 0; }
 
 // 用開源套件 mp4box.js（GitHub: gpac/mp4box.js）讀出原影片裡的 AAC 聲音
 async function readOriginalAAC(file) {
@@ -897,7 +962,7 @@ async function pickVideoConfig(w, h) {
 }
 
 document.getElementById("exportBtn").addEventListener("click", async () => {
-  if (!picked && !keyframes.length) { status.textContent = "請先點選要追蹤的人，或加入手動關鍵影格"; return; }
+  if (!picks.length && !keyframes.length) { status.textContent = "請先點選要追蹤的人，或加入手動關鍵影格"; return; }
   if (exporting) return;
   if (!("VideoEncoder" in window)) { status.textContent = "這個瀏覽器不支援逐格輸出，請用新版 Chrome"; return; }
   exporting = true;
@@ -946,18 +1011,18 @@ document.getElementById("exportBtn").addEventListener("click", async () => {
 
   // 3. 一格一格處理
   // 有手動關鍵影格就從頭輸出；沒有的話，跟以前一樣從點選人物的時間點開始
-  const start = keyframes.length ? 0 : picked.time;
-  const pickTime = picked ? picked.time : Infinity;
-  target = picked ? { ...picked.pos } : null;
-  lostCount = 0;
+  const start = keyframes.length ? 0 : picks[0].time;
   manualEdit = false;
-  cam = keyframes.length ? { ...keyframeAt(start) } : { x: picked.pos.x, y: picked.pos.y };
+  activePick = -2;           // 從頭重新同步選人和追蹤狀態
+  syncPick(start);
+  const firstCam = activePick >= 0 ? picks[activePick].pos : (manualCamAt(start) || { x: 0.5, y: 0.5 });
+  cam = { x: firstCam.x, y: firstCam.y };
   const total = Math.floor((video.duration - start) * FPS);
   for (let i = 0; i < total; i++) {
     const t = start + i / FPS;
     await seekTo(t);
-    // 到了點選人物的時間點才開始偵測和追蹤
-    if (t >= pickTime - 0.001 && i % DETECT_EVERY === 0) { detect(); draw(); }
+    syncPick(t);   // 依時間切換到對應的選人片段
+    if (activePick >= 0 && i % DETECT_EVERY === 0) { detect(); draw(); }
     renderPreview();
     const frame = new VideoFrame(preview, { timestamp: Math.round(i * 1e6 / FPS), duration: Math.round(1e6 / FPS) });
     venc.encode(frame, { keyFrame: i % (FPS * 2) === 0 });   // 每 2 秒放一個關鍵格，剪輯軟體拖拉比較順
@@ -1023,10 +1088,7 @@ const DETECT_EVERY = 2;   // 每 2 格偵測一次；還是卡的話可以改成
 let frameCount = 0;
 function onVideoFrame() {
   if (exporting) { video.requestVideoFrameCallback(onVideoFrame); return; }   // 輸出中交給逐格流程處理
-  // 從「點選人物之前」進入之後，重新從點選時的位置開始追蹤
-  const before = !!picked && video.currentTime < picked.time - 0.001;
-  if (wasBefore && !before && picked) { target = { ...picked.pos }; lostCount = 0; }
-  wasBefore = before;
+  syncPick(video.currentTime);   // 進入新的選人片段時，重新鎖定那次選的人
   frameCount++;
   if (frameCount % DETECT_EVERY === 0 || people.length === 0) {
     detect();

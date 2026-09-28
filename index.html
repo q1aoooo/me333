@@ -127,7 +127,6 @@
   /* 輸出按鈕放在播放列上，電腦和手機都看得到 */
   #exportMini { flex: none; }
   #downloadMini[hidden] { display: none; }
-  .player { display: contents; }   /* 電腦上不影響原本的排版 */
 
   /* 手機切換畫面的按鈕（電腦上不需要） */
   .viewtabs { display: none; }
@@ -227,7 +226,7 @@
     #dropzone { grid-column: 1; }
       .wordmark { font-size: 38px; }
     /* 手機上兩張小卡上下排，各自矮一點，不用滑很久 */
-    .frame video, .frame #preview { max-height: 34vh; }   /* 畫面縮小一點，下面還看得到設定 */
+    .frame video, .frame #preview { max-height: 52vh; }
     .frame { width: 100%; }
     .frame video, .frame #preview { margin: 0 auto; }
     .steps li { font-size: 13px; }
@@ -244,17 +243,8 @@
     .viewtabs button { flex: 1; border: 0; background: none; padding: 8px; font-weight: 700; cursor: pointer; }
     .viewtabs button.on { background: var(--ink); color: var(--paper); }
     body[data-view="source"] .frame.result, body[data-view="result"] .frame.source { display: none; }
-    /* 播放區（切換鈕＋畫面＋播放列）固定在最上面 */
-    body.has-video .player {
-      display: flex; flex-direction: column; gap: 8px; grid-column: 1;
-      position: sticky; top: 0; z-index: 20; margin: 0 -16px; padding: 8px 16px 10px;
-      background: var(--paper); border-bottom: 2px solid var(--ink);
-    }
-    .frame { padding: 8px 8px 30px; box-shadow: none; }
-    .frame figcaption { bottom: 6px; font-size: 12px; }
-    .playbar { box-shadow: none; padding: 4px 8px 4px 4px; gap: 8px; }
-    .btn.round { width: 36px; height: 36px; }
-    #exportMini { padding: 6px 12px; font-size: 14px; }
+    .playbar { grid-column: 1; position: sticky; bottom: 10px; z-index: 10; }
+    #exportMini { display: inline-flex; flex: none; }
     #timeDur { display: none; }
   }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
@@ -295,8 +285,6 @@
     </label>
     <input type="file" id="picker" accept="video/*" hidden>
 
-    <!-- 播放區：電腦上照原本排；手機上會固定在最上面，往下滑調設定時一樣看得到畫面 -->
-    <div class="player">
     <!-- 手機上一次只看一個畫面，用這兩顆按鈕切換 -->
     <div class="viewtabs">
       <button data-view="source" class="on">原始畫面</button>
@@ -317,7 +305,7 @@
       <figcaption><span>置中預覽</span><b>&lt;333*</b></figcaption>
     </figure>
 
-    <!-- 自己的播放列：播放／暫停、時間軸、輸出 -->
+    <!-- 自己的播放列：播放／暫停、時間軸（手機上會固定在畫面最下面） -->
     <div class="playbar">
       <button id="playBtn" class="btn primary round" aria-label="播放">▶</button>
       <span id="timeNow">0:00.0</span>
@@ -325,7 +313,6 @@
       <span id="timeDur">0:00.0</span>
       <button id="exportMini" class="btn primary">輸出影片</button>
       <a id="downloadMini" class="btn" hidden>下載</a>
-    </div>
     </div>
 
     <!-- 設定面板 -->
@@ -397,9 +384,7 @@
         <button id="exportBtn" class="btn primary big">輸出影片</button>
         <div class="progress"><div id="progressBar"></div></div>
         <a id="download" class="btn" hidden>下載置中影片</a>
-        <!-- 輸出方式 -->
-        <label class="check"><input type="checkbox" id="exactExport"> 逐格模式（最穩定，但比較慢）</label>
-        <p class="note">一般會邊播放邊輸出，漏掉的畫面會自動退回補上，品質和逐格模式一樣但快很多。如果輸出還是有問題，再勾選逐格模式。</p>
+        <p class="note">從點選人物的那一刻開始輸出到結尾，會一格一格處理，請等進度跑完。</p>
       </section>
     </aside>
   </main>
@@ -420,17 +405,35 @@ const drawer = new DrawingUtils(ctx);
 const vision = await FilesetResolver.forVisionTasks(
   "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
 // 兩種模型：lite 比較快，full 比較準、骨架比較不會亂跳
+// 模型檔案的下載來源：先用放在自己網站（repo）裡的檔案，找不到再去 Google 的伺服器下載
 const MODELS = {
-  lite: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
-  full: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task",
+  lite: ["pose_landmarker_lite.task",
+         "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task"],
+  full: ["https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task"],
 };
+const modelCache = {};   // 下載過的模型存起來，不用重複下載
+
+// 依序試每個來源，成功就回傳模型的內容
+async function loadModel(kind) {
+  if (modelCache[kind]) return modelCache[kind];
+  for (const url of MODELS[kind]) {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      modelCache[kind] = new Uint8Array(await res.arrayBuffer());
+      return modelCache[kind];
+    } catch (err) { console.warn("模型下載失敗，換下一個來源：", url, err); }
+  }
+  throw new Error("模型下載失敗");
+}
 // 判斷是不是手機（用手指操作的裝置），手機上會自動用比較省力的設定
 const IS_MOBILE = matchMedia("(pointer: coarse)").matches || innerWidth < 700;
 const MAX_SIDE = IS_MOBILE ? 1280 : 1920;   // 處理和輸出畫面的長邊上限（手機用 720p 左右）
 
 async function createPose(kind, numPoses) {
+  const buffer = await loadModel(kind);   // 先把模型下載好，GPU、CPU 共用同一份，不會重複下載
   const make = delegate => PoseLandmarker.createFromOptions(vision, {
-    baseOptions: { modelAssetPath: MODELS[kind], delegate },
+    baseOptions: { modelAssetBuffer: buffer, delegate },
     runningMode: "VIDEO",
     numPoses,   // 最多同時偵測幾個人
   });
@@ -440,7 +443,13 @@ async function createPose(kind, numPoses) {
 }
 // 目前先專注在人數不多的影片（最多同時偵測 3 人），多人團體影片之後再優化
 const MAX_PEOPLE = 3;
-let pose = await createPose("lite", MAX_PEOPLE);
+let pose;
+try { pose = await createPose("lite", MAX_PEOPLE); }
+catch (err) {
+  // 講清楚是下載失敗，不要誤導成 GPU 的問題
+  status.textContent = "偵測模型下載失敗，請檢查網路後重新整理頁面";
+  throw err;
+}
 status.textContent = "準備好了";
 document.body.classList.add("ready");
 
@@ -619,7 +628,13 @@ document.querySelectorAll('input[name="ratio"]').forEach(r => r.onchange = () =>
 document.getElementById("accurate").addEventListener("change", async (e) => {
   status.textContent = "切換模型中…";
   const old = pose;
-  pose = await createPose(e.target.checked ? "full" : "lite", MAX_PEOPLE);
+  try { pose = await createPose(e.target.checked ? "full" : "lite", MAX_PEOPLE); }
+  catch (err) {
+    // 準確模式的模型下載失敗：維持原本的模型
+    e.target.checked = !e.target.checked;
+    status.textContent = "模型下載失敗，請檢查網路後再試";
+    return;
+  }
   old.close();
   status.textContent = e.target.checked ? "已切換到準確模式" : "已切換回一般模式";
   if (video.paused && video.videoWidth) { detect(); draw(); }
@@ -1144,73 +1159,6 @@ async function readOriginalAAC(file) {
   return { sampleRate, numberOfChannels, description, samples };
 }
 
-// ===== 快速又不漏格的輸出：讓影片自己播放，每出現一格就處理一格 =====
-// 以前是一格一格「跳」到每個時間點，每跳一次都要等影片解碼，很慢。
-// 改成直接播放，影片本來就會一格一格送出畫面，我們只要跟著處理就好。
-// 每一格的時間用影片本身的時間；如果發現漏了格子，就退回去放慢重來，所以品質跟逐格模式一樣。
-async function exportByPlayback(start, venc) {
-  const end = video.duration;
-  const oldMuted = video.muted, oldRate = video.playbackRate;
-  video.muted = true;                             // 輸出時不出聲
-  let rate = IS_MOBILE ? 0.5 : 1;                 // 手機比較慢，先用半速播放
-  video.playbackRate = rate;
-  await seekTo(start);
-  let n = 0, lastTs = -1, lastT = start, lastKey = -Infinity, lastPresented = null, done = false, recovering = false;
-  // 開始播放前，先處理目前停著的第一格（不然播放後第一個收到的會是下一格）
-  syncPick(start);
-  if (activePick >= 0) { detect(); draw(); }
-  renderPreview();
-  { const f0 = new VideoFrame(preview, { timestamp: 0 }); venc.encode(f0, { keyFrame: true }); f0.close(); }
-  lastTs = 0; lastKey = start; n = 1;
-  await new Promise(resolve => {
-    const finish = () => { if (done) return; done = true; video.pause(); resolve(); };
-
-    // 發現漏格時：退回上一個處理好的畫面，放慢播放速度再繼續，保證每一格都處理到
-    const recover = async () => {
-      recovering = true;
-      video.pause();
-      rate = Math.max(0.1, rate * 0.7);
-      await seekTo(lastT);
-      video.playbackRate = rate;
-      lastPresented = null;
-      recovering = false;
-      video.requestVideoFrameCallback(onFrame);
-      video.play();
-    };
-
-    const onFrame = (now, meta) => {
-      if (done || recovering) return;
-      const t = meta.mediaTime;
-      if (t >= end - 0.001) { finish(); return; }
-      // presentedFrames 每出現一格畫面就加 1；一次跳 2 以上，代表中間有格子沒被處理到
-      if (lastPresented !== null && meta.presentedFrames - lastPresented > 1 && t > lastT + 0.001) { recover(); return; }
-      lastPresented = meta.presentedFrames;
-      const ts = Math.round((t - start) * 1e6);
-      if (ts > lastTs) {                           // 退回時會重複看到處理過的畫面，跳過就好
-        syncPick(t);
-        if (activePick >= 0 && n % DETECT_EVERY === 0) { detect(); draw(); }
-        renderPreview();
-        const frame = new VideoFrame(preview, { timestamp: Math.max(0, ts) });
-        const key = t - lastKey >= 2;              // 每 2 秒放一個關鍵格
-        if (key) lastKey = t;
-        venc.encode(frame, { keyFrame: key });
-        frame.close();
-        lastTs = ts; lastT = t;
-        n++;
-      }
-      const pct = Math.min(100, Math.round((t - start) / (end - start) * 100));
-      status.textContent = `輸出中 ${pct}%`;
-      document.getElementById("progressBar").style.width = pct + "%";
-      video.requestVideoFrameCallback(onFrame);
-    };
-    video.addEventListener("ended", () => { if (!recovering) finish(); });
-    video.requestVideoFrameCallback(onFrame);
-    video.play();
-  });
-  video.muted = oldMuted;
-  video.playbackRate = oldRate;
-}
-
 // 找瀏覽器支援的 H.264 設定（剪映、Wink 都讀得了）
 async function pickVideoConfig(w, h) {
   for (const codec of ["avc1.640028", "avc1.4d0028", "avc1.42e028"]) {
@@ -1279,9 +1227,7 @@ document.getElementById("exportBtn").addEventListener("click", async () => {
   const firstCam = activePick >= 0 ? picks[activePick].pos : (manualCamAt(start) || { x: 0.5, y: 0.5 });
   cam = { x: firstCam.x, y: firstCam.y };
   const total = Math.floor((video.duration - start) * FPS);
-  if (!document.getElementById("exactExport").checked) {
-    await exportByPlayback(start, venc);   // 預設：邊播放邊處理，快很多
-  } else for (let i = 0; i < total; i++) {   // 逐格模式：一格一格跳過去處理（最穩定）
+  for (let i = 0; i < total; i++) {
     const t = start + i / FPS;
     await seekTo(t);
     syncPick(t);   // 依時間切換到對應的選人片段

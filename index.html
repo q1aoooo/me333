@@ -175,6 +175,12 @@
   #download[hidden] { display: none; }
   .note { color: var(--muted); font-size: 13px; margin: 10px 0 0; }
   .hint-line { color: var(--muted); font-size: 12px; margin: -4px 0 6px; }
+  .keys { display: flex; flex-wrap: wrap; gap: 6px; }
+  .keys .key { display: inline-flex; align-items: center; border: 2px solid var(--ink); border-radius: 999px; overflow: hidden; }
+  .keys .key button { border: 0; background: none; cursor: pointer; font: inherit; font-size: 13px; padding: 2px 8px; }
+  .keys .key button + button { border-left: 2px solid var(--ink); font-weight: 700; }
+  .keys .key button:hover { background: var(--soft); }
+  .keys .empty { color: var(--muted); font-size: 13px; }
   #preview { cursor: ns-resize; touch-action: none; }   /* 可以在預覽上拖曳調整上下 */
 
   /* ===== 小螢幕 ===== */
@@ -260,6 +266,8 @@
         <div class="row"><label for="maxPeople">最多偵測人數</label><output id="maxPeopleVal">8</output>
           <input type="range" id="maxPeople" min="1" max="15" step="1" value="8"></div>
         <p class="hint-line">人多的團體影片可以調高；人越多，偵測會越慢</p>
+        <!-- 準確模式 -->
+        <label class="check"><input type="checkbox" id="accurate"> 準確模式（骨架比較穩，但比較慢）</label>
         <div class="row"><label for="zoom">放大倍率</label><output id="zoomVal">1.15</output>
           <input type="range" id="zoom" min="1" max="2" step="0.05" value="1.15"></div>
         <!-- 人在畫面裡偏上或偏下 -->
@@ -269,6 +277,16 @@
         <div class="row"><label for="follow">跟隨速度</label><output id="followVal">0.08</output>
           <input type="range" id="follow" min="0.02" max="0.5" step="0.01" value="0.08"></div>
         <label class="check"><input type="checkbox" id="followY" checked> 上下也跟隨</label>
+      </section>
+
+      <!-- 手動關鍵影格 -->
+      <section>
+        <div class="pane-head" style="min-height:0; margin-bottom:4px">
+          <h3 style="margin:0">手動關鍵影格</h3>
+          <button id="addKey" class="btn small">＋ 加在這裡</button>
+        </div>
+        <p class="hint-line">人物還沒出現、還沒開始追蹤的片段，畫面會照這裡的關鍵影格移動。暫停後在預覽畫面上拖曳，調好位置再按「加在這裡」</p>
+        <div id="keyList" class="keys"></div>
       </section>
 
       <section>
@@ -325,14 +343,19 @@ const drawer = new DrawingUtils(ctx);
 
 const vision = await FilesetResolver.forVisionTasks(
   "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
-const pose = await PoseLandmarker.createFromOptions(vision, {
-  baseOptions: {
-    modelAssetPath: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
-    delegate: "GPU",   // 用顯示卡來跑偵測，比較快
-  },
-  runningMode: "VIDEO",
-  numPoses: 8,   // 預設最多同時偵測 8 個人，可以在設定裡改
-});
+// 兩種模型：lite 比較快，full 比較準、骨架比較不會亂跳
+const MODELS = {
+  lite: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
+  full: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task",
+};
+function createPose(kind, numPoses) {
+  return PoseLandmarker.createFromOptions(vision, {
+    baseOptions: { modelAssetPath: MODELS[kind], delegate: "GPU" },   // 用顯示卡來跑偵測，比較快
+    runningMode: "VIDEO",
+    numPoses,   // 最多同時偵測幾個人，可以在設定裡改
+  });
+}
+let pose = await createPose("lite", 8);
 status.textContent = "準備好了";
 document.body.classList.add("ready");
 
@@ -342,6 +365,7 @@ function loadFile(file) {
   video.src = URL.createObjectURL(file);
   currentFile = file;   // 記住原始檔，輸出時要拿聲音
   target = null; picked = null;
+  keyframes = []; manualEdit = false; renderKeys();   // 換影片就清空關鍵影格
   document.body.classList.add("has-video");
   document.getElementById("fileName").textContent = file.name;
   document.getElementById("download").hidden = true;
@@ -507,6 +531,16 @@ document.querySelectorAll('input[name="ratio"]').forEach(r => r.onchange = () =>
 // 改變最多偵測人數：直接更新偵測器的設定，暫停中的話馬上重新偵測一次
 const maxPeopleEl = document.getElementById("maxPeople");
 maxPeopleEl.addEventListener("input", () => { document.getElementById("maxPeopleVal").textContent = maxPeopleEl.value; });
+// 切換準確模式：換成比較大的模型重新建立偵測器
+document.getElementById("accurate").addEventListener("change", async (e) => {
+  status.textContent = "切換模型中…";
+  const old = pose;
+  pose = await createPose(e.target.checked ? "full" : "lite", parseInt(maxPeopleEl.value));
+  old.close();
+  status.textContent = e.target.checked ? "已切換到準確模式" : "已切換回一般模式";
+  if (video.paused && video.videoWidth) { detect(); draw(); }
+});
+
 maxPeopleEl.addEventListener("change", async () => {
   await pose.setOptions({ numPoses: parseInt(maxPeopleEl.value) });
   if (video.paused && video.videoWidth) { detect(); draw(); }
@@ -520,11 +554,22 @@ offsetEl.addEventListener("input", () => { showOffset(); refreshIfPaused(); });
 // 在預覽畫面上按住上下拖曳，也能調整（往下拖，人就往下移）
 let dragFrom = null;
 preview.addEventListener("pointerdown", e => {
-  dragFrom = { y: e.clientY, v: parseFloat(offsetEl.value) };
+  // 沒在追蹤人物時，拖曳是直接移動鏡頭（上下左右都可以），用來設定關鍵影格
+  const manual = !isTrackingNow();
+  dragFrom = { x: e.clientX, y: e.clientY, v: parseFloat(offsetEl.value), cam: { ...cam }, manual };
+  if (manual) manualEdit = true;
   preview.setPointerCapture(e.pointerId);
 });
 preview.addEventListener("pointermove", e => {
   if (!dragFrom) return;
+  if (dragFrom.manual) {
+    const r = preview.getBoundingClientRect();
+    const clamp = (v, half) => Math.max(half, Math.min(1 - half, v));
+    cam.x = clamp(dragFrom.cam.x - (e.clientX - dragFrom.x) / r.width * lastCrop.fw, lastCrop.fw / 2);
+    cam.y = clamp(dragFrom.cam.y - (e.clientY - dragFrom.y) / r.height * lastCrop.fh, lastCrop.fh / 2);
+    refreshIfPaused();
+    return;
+  }
   const h = preview.getBoundingClientRect().height;
   const v = dragFrom.v + (e.clientY - dragFrom.y) / h * 2 / 0.7;   // 拖多少，人就大約移多少
   offsetEl.value = Math.max(-1, Math.min(1, v)).toFixed(2);
@@ -532,6 +577,58 @@ preview.addEventListener("pointermove", e => {
   refreshIfPaused();
 });
 preview.addEventListener("pointerup", () => { dragFrom = null; });
+
+// ===== 手動關鍵影格 =====
+function isTrackingNow() {
+  return !!target && (!picked || video.currentTime >= picked.time - 0.001);
+}
+
+// 找出這個時間點的鏡頭位置：在兩個關鍵影格之間平滑地過渡（先慢、中間快、再慢）
+function keyframeAt(t) {
+  const k = keyframes;
+  if (t <= k[0].t) return k[0];
+  if (t >= k[k.length - 1].t) return k[k.length - 1];
+  let i = 0;
+  while (k[i + 1].t < t) i++;
+  const a = k[i], b = k[i + 1];
+  const u = (t - a.t) / (b.t - a.t);
+  const s = u * u * (3 - 2 * u);
+  return { x: a.x + (b.x - a.x) * s, y: a.y + (b.y - a.y) * s };
+}
+
+function fmtTime(t) {
+  const m = Math.floor(t / 60);
+  return `${m}:${(t % 60).toFixed(1).padStart(4, "0")}`;
+}
+
+// 顯示關鍵影格列表：點時間跳過去，點 × 刪掉
+function renderKeys() {
+  const list = document.getElementById("keyList");
+  list.innerHTML = keyframes.length ? "" : '<span class="empty">還沒有關鍵影格</span>';
+  keyframes.forEach((kf, i) => {
+    const el = document.createElement("span");
+    el.className = "key";
+    el.innerHTML = `<button title="跳到這裡">${fmtTime(kf.t)}</button><button aria-label="刪除">×</button>`;
+    el.children[0].onclick = () => { video.pause(); video.currentTime = kf.t; };
+    el.children[1].onclick = () => { keyframes.splice(i, 1); renderKeys(); refreshIfPaused(); };
+    list.appendChild(el);
+  });
+}
+
+document.getElementById("addKey").addEventListener("click", () => {
+  if (!video.videoWidth) return;
+  const t = video.currentTime;
+  keyframes = keyframes.filter(k => Math.abs(k.t - t) > 0.05);   // 同一個時間點就覆蓋
+  keyframes.push({ t, x: cam.x, y: cam.y });
+  keyframes.sort((a, b) => a.t - b.t);
+  manualEdit = false;
+  renderKeys();
+  status.textContent = `已在 ${fmtTime(t)} 加入關鍵影格`;
+});
+
+// 播放或跳到別的時間，就結束「正在手動調整」的狀態
+video.addEventListener("play", () => { manualEdit = false; });
+video.addEventListener("seeked", () => { if (!exporting) manualEdit = false; });
 
 filterAmtEl.addEventListener("input", refreshIfPaused);
 
@@ -577,10 +674,15 @@ function renderPreview() {
   const zoom = parseFloat(zoomEl.value);
   const k = parseFloat(followEl.value);
 
-  // 平滑：每一格只往目標移動一小段，數字越大跟得越快、越不平滑
-  if (target) {
+  // 有在追蹤人物時跟著人；還沒開始追蹤時，照手動關鍵影格移動
+  const tracking = isTrackingNow();
+  if (tracking) {
+    // 平滑：每一格只往目標移動一小段，數字越大跟得越快、越不平滑
     cam.x += (target.x - cam.x) * k;
     if (followYEl.checked) cam.y += (target.y - cam.y) * k;
+  } else if (keyframes.length && !manualEdit) {
+    const p = keyframeAt(video.currentTime);
+    cam.x = p.x; cam.y = p.y;
   }
 
   // 先依比例框出範圍，再依放大倍率縮小
@@ -589,8 +691,10 @@ function renderPreview() {
   // 讓鏡頭中心對準人，但不能超出原影片邊界
   let cx = cam.x * vw - cw / 2;
   // 加上「人物上下位置」：數值越大，框框往上移，人就會出現在畫面比較下面
-  const offset = parseFloat(offsetEl.value) * 0.35 * ch;
-  let cy = (followYEl.checked ? cam.y : 0.5) * vh - ch / 2 - offset;
+  const offset = tracking ? parseFloat(offsetEl.value) * 0.35 * ch : 0;   // 上下位置只在追蹤人物時套用
+  const camY = tracking ? (followYEl.checked ? cam.y : 0.5) : cam.y;
+  let cy = camY * vh - ch / 2 - offset;
+  lastCrop = { fw: cw / vw, fh: ch / vh };   // 記住框框佔原影片多少，拖曳時用
   cx = Math.max(0, Math.min(vw - cw, cx));
   cy = Math.max(0, Math.min(vh - ch, cy));
 
@@ -612,22 +716,59 @@ function bodyCenter(lm) {
 // 兩個點之間的距離（比例座標）
 function dist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
 
-// 要追蹤的人：記住他上一格的身體中心
-let target = null;
-// 一格之內最多能移動多遠，超過就當作「跟丟了」
-const MAX_JUMP = 0.15;
+// 身體大小：肩膀中點到髖部中點的距離（軀幹長度），離鏡頭近的人大、遠的人小
+function bodySize(lm) {
+  const sh = { x: (lm[11].x + lm[12].x) / 2, y: (lm[11].y + lm[12].y) / 2 };
+  const hp = { x: (lm[23].x + lm[24].x) / 2, y: (lm[23].y + lm[24].y) / 2 };
+  return Math.max(0.02, dist(sh, hp));
+}
+
+// 要追蹤的人：記住位置、身體大小、移動方向
+let target = null;   // { x, y, size, vx, vy }
+function makeTarget(lm) {
+  const c = bodyCenter(lm);
+  return { x: c.x, y: c.y, size: bodySize(lm), vx: 0, vy: 0 };
+}
+// 能接受的差距：以「一個軀幹長」為單位，遠近的人都適用（取代原本固定的 0.15）
+const MATCH_LIMIT = 1.0;
+let lostCount = 0;   // 連續幾次沒找到人
+let keyframes = [];    // 手動關鍵影格：{ t: 秒數, x, y: 鏡頭位置 }
+let manualEdit = false; // 正在手動拖曳調整鏡頭（還沒存成關鍵影格）
+let lastCrop = { fw: 1, fh: 1 };
+let wasBefore = false;  // 上一格是不是還在點選人物之前
 
 let people = [];   // 這一格偵測到的所有人
 
-// 在人群中找出離 target 最近的那個人
+// 在人群中找出「最像同一個人」的：
+// 1. 先依他剛剛移動的方向，預測他這一格應該在哪
+// 2. 比較每個人和預測位置的距離，也比較身體大小有沒有突然變很多
+// 這樣兩個人靠很近時，比較不會跳到別人身上
 function findTarget() {
   if (!target || people.length === 0) return -1;
-  let best = -1, bestD = Infinity;
+  const pred = { x: target.x + target.vx, y: target.y + target.vy };
+  let best = -1, bestCost = Infinity;
   people.forEach((lm, i) => {
-    const d = dist(bodyCenter(lm), target);
-    if (d < bestD) { bestD = d; best = i; }
+    const moved = dist(bodyCenter(lm), pred) / target.size;               // 移動了幾個軀幹長
+    const sizeDiff = Math.abs(bodySize(lm) - target.size) / target.size;  // 大小差多少
+    const cost = moved + 0.7 * sizeDiff;
+    if (cost < bestCost) { bestCost = cost; best = i; }
   });
-  return bestD < MAX_JUMP ? best : -1;
+  // 跟丟一陣子後，放寬一點條件，讓它比較容易重新找回來
+  const limit = MATCH_LIMIT * (lostCount > 5 ? 1.8 : 1);
+  return bestCost < limit ? best : -1;
+}
+
+// 更新追蹤的位置：只往新位置靠近一部分，濾掉骨架的小抖動
+const JITTER_SMOOTH = 0.6;   // 越小越穩，但反應越慢
+function updateTarget(lm) {
+  const c = bodyCenter(lm);
+  const nx = target.x + (c.x - target.x) * JITTER_SMOOTH;
+  const ny = target.y + (c.y - target.y) * JITTER_SMOOTH;
+  target.vx = target.vx * 0.5 + (nx - target.x) * 0.5;   // 記住移動方向（也平滑過）
+  target.vy = target.vy * 0.5 + (ny - target.y) * 0.5;
+  target.x = nx;
+  target.y = ny;
+  target.size = target.size * 0.8 + bodySize(lm) * 0.2;
 }
 
 function detect() {
@@ -637,7 +778,9 @@ function detect() {
 
 function draw() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  const idx = findTarget();
+  // 還沒到點選人物的時間點，就不追蹤（避免抓到別人）
+  const allowTrack = !picked || video.currentTime >= picked.time - 0.001;
+  const idx = allowTrack ? findTarget() : -1;
   people.forEach((lm, i) => {
     const isTarget = i === idx;
     // 追蹤中的人畫粉紅色，其他人畫淡灰色
@@ -645,7 +788,8 @@ function draw() {
       { color: isTarget ? "#FFFFFF" : "rgba(255,255,255,0.3)", lineWidth: isTarget ? 4 : 2 });
   });
   if (idx >= 0) {
-    target = bodyCenter(people[idx]);   // 更新位置，下一格用
+    updateTarget(people[idx]);   // 平滑地更新位置，下一格用
+    lostCount = 0;
     ctx.fillStyle = "#111111";
     ctx.strokeStyle = "#FFFFFF";
     ctx.lineWidth = 4;
@@ -653,8 +797,10 @@ function draw() {
     ctx.arc(target.x * canvas.width, target.y * canvas.height, 12, 0, Math.PI * 2);
     ctx.fill();
     ctx.stroke();
-  } else if (target) {
-    status.textContent = "這一格跟丟了，可以暫停後重新選人";
+  } else if (target && allowTrack) {
+    lostCount++;
+    target.vx *= 0.5; target.vy *= 0.5;   // 跟丟時先停在原地附近等他出現
+    if (lostCount > 15) status.textContent = "跟丟了，可以暫停後重新選人";
   }
 }
 
@@ -676,11 +822,12 @@ canvas.addEventListener("click", (e) => {
   let best = null, bestD = Infinity;
   people.forEach((lm) => {
     const d = dist(bodyCenter(lm), click);
-    if (d < bestD) { bestD = d; best = bodyCenter(lm); }
+    if (d < bestD) { bestD = d; best = makeTarget(lm); }   // 記住位置和身體大小
   });
   if (best) {
     target = best;
-    cam = { ...best };   // 選好人時鏡頭直接對準，不用慢慢滑過去
+    lostCount = 0;
+    cam = { x: best.x, y: best.y };   // 選好人時鏡頭直接對準，不用慢慢滑過去
     picked = { time: video.currentTime, pos: { ...best } };   // 記住在哪個時間點選了誰，輸出時從這裡開始
     stage.classList.remove("picking");
     status.textContent = "選好了，播放看看預覽";
@@ -750,7 +897,7 @@ async function pickVideoConfig(w, h) {
 }
 
 document.getElementById("exportBtn").addEventListener("click", async () => {
-  if (!picked) { status.textContent = "請先選擇要追蹤的人"; return; }
+  if (!picked && !keyframes.length) { status.textContent = "請先點選要追蹤的人，或加入手動關鍵影格"; return; }
   if (exporting) return;
   if (!("VideoEncoder" in window)) { status.textContent = "這個瀏覽器不支援逐格輸出，請用新版 Chrome"; return; }
   exporting = true;
@@ -797,14 +944,20 @@ document.getElementById("exportBtn").addEventListener("click", async () => {
   });
   venc.configure(vcfg);
 
-  // 3. 一格一格處理：從選人的時間點開始，到影片結尾
-  target = { ...picked.pos };
-  cam = { ...picked.pos };
-  const start = picked.time;
+  // 3. 一格一格處理
+  // 有手動關鍵影格就從頭輸出；沒有的話，跟以前一樣從點選人物的時間點開始
+  const start = keyframes.length ? 0 : picked.time;
+  const pickTime = picked ? picked.time : Infinity;
+  target = picked ? { ...picked.pos } : null;
+  lostCount = 0;
+  manualEdit = false;
+  cam = keyframes.length ? { ...keyframeAt(start) } : { x: picked.pos.x, y: picked.pos.y };
   const total = Math.floor((video.duration - start) * FPS);
   for (let i = 0; i < total; i++) {
-    await seekTo(start + i / FPS);
-    if (i % DETECT_EVERY === 0) { detect(); draw(); }
+    const t = start + i / FPS;
+    await seekTo(t);
+    // 到了點選人物的時間點才開始偵測和追蹤
+    if (t >= pickTime - 0.001 && i % DETECT_EVERY === 0) { detect(); draw(); }
     renderPreview();
     const frame = new VideoFrame(preview, { timestamp: Math.round(i * 1e6 / FPS), duration: Math.round(1e6 / FPS) });
     venc.encode(frame, { keyFrame: i % (FPS * 2) === 0 });   // 每 2 秒放一個關鍵格，剪輯軟體拖拉比較順
@@ -870,6 +1023,10 @@ const DETECT_EVERY = 2;   // 每 2 格偵測一次；還是卡的話可以改成
 let frameCount = 0;
 function onVideoFrame() {
   if (exporting) { video.requestVideoFrameCallback(onVideoFrame); return; }   // 輸出中交給逐格流程處理
+  // 從「點選人物之前」進入之後，重新從點選時的位置開始追蹤
+  const before = !!picked && video.currentTime < picked.time - 0.001;
+  if (wasBefore && !before && picked) { target = { ...picked.pos }; lostCount = 0; }
+  wasBefore = before;
   frameCount++;
   if (frameCount % DETECT_EVERY === 0 || people.length === 0) {
     detect();
@@ -879,6 +1036,7 @@ function onVideoFrame() {
   video.requestVideoFrameCallback(onVideoFrame);   // 等下一格影片畫面出現再呼叫
 }
 video.requestVideoFrameCallback(onVideoFrame);
+renderKeys();   // 一開始先顯示「還沒有關鍵影格」
 </script>
 </body>
 </html>

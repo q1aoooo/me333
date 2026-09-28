@@ -267,9 +267,6 @@
       <section>
         <h3>追蹤</h3>
         <!-- 最多偵測幾個人 -->
-        <div class="row"><label for="maxPeople">最多偵測人數</label><output id="maxPeopleVal">8</output>
-          <input type="range" id="maxPeople" min="1" max="15" step="1" value="8"></div>
-        <p class="hint-line">人多的團體影片可以調高；人越多，偵測會越慢</p>
         <!-- 準確模式 -->
         <label class="check"><input type="checkbox" id="accurate"> 準確模式（骨架比較穩，但比較慢）</label>
         <div class="row"><label for="zoom">放大倍率</label><output id="zoomVal">1.15</output>
@@ -359,7 +356,9 @@ function createPose(kind, numPoses) {
     numPoses,   // 最多同時偵測幾個人，可以在設定裡改
   });
 }
-let pose = await createPose("lite", 8);
+// 目前先專注在人數不多的影片（最多同時偵測 3 人），多人團體影片之後再優化
+const MAX_PEOPLE = 3;
+let pose = await createPose("lite", MAX_PEOPLE);
 status.textContent = "準備好了";
 document.body.classList.add("ready");
 
@@ -532,21 +531,13 @@ document.querySelectorAll('input[name="filter"]').forEach(r => r.onchange = refr
 // 換比例時，重新設定輸出大小並更新預覽
 document.querySelectorAll('input[name="ratio"]').forEach(r => r.onchange = () => { setOutputSize(); refreshIfPaused(); });
 
-// 改變最多偵測人數：直接更新偵測器的設定，暫停中的話馬上重新偵測一次
-const maxPeopleEl = document.getElementById("maxPeople");
-maxPeopleEl.addEventListener("input", () => { document.getElementById("maxPeopleVal").textContent = maxPeopleEl.value; });
 // 切換準確模式：換成比較大的模型重新建立偵測器
 document.getElementById("accurate").addEventListener("change", async (e) => {
   status.textContent = "切換模型中…";
   const old = pose;
-  pose = await createPose(e.target.checked ? "full" : "lite", parseInt(maxPeopleEl.value));
+  pose = await createPose(e.target.checked ? "full" : "lite", MAX_PEOPLE);
   old.close();
   status.textContent = e.target.checked ? "已切換到準確模式" : "已切換回一般模式";
-  if (video.paused && video.videoWidth) { detect(); draw(); }
-});
-
-maxPeopleEl.addEventListener("change", async () => {
-  await pose.setOptions({ numPoses: parseInt(maxPeopleEl.value) });
   if (video.paused && video.videoWidth) { detect(); draw(); }
 });
 

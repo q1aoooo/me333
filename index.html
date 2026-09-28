@@ -174,6 +174,8 @@
   #download { display: block; text-align: center; margin-top: 12px; text-decoration: none; }
   #download[hidden] { display: none; }
   .note { color: var(--muted); font-size: 13px; margin: 10px 0 0; }
+  .hint-line { color: var(--muted); font-size: 12px; margin: -4px 0 6px; }
+  #preview { cursor: ns-resize; touch-action: none; }   /* 可以在預覽上拖曳調整上下 */
 
   /* ===== 小螢幕 ===== */
   @media (max-width: 1100px) {
@@ -243,11 +245,26 @@
     <!-- 設定面板 -->
     <aside>
       <section>
+        <h3>畫面比例</h3>
+        <!-- 選輸出的裁切比例 -->
+        <div class="chips">
+          <input type="radio" name="ratio" id="r-orig" value="orig" checked><label for="r-orig">原比例</label>
+          <input type="radio" name="ratio" id="r-916" value="0.5625"><label for="r-916">9:16</label>
+          <input type="radio" name="ratio" id="r-11" value="1"><label for="r-11">1:1</label>
+          <input type="radio" name="ratio" id="r-34" value="0.75"><label for="r-34">3:4</label>
+        </div>
+      </section>
+
+      <section>
         <h3>追蹤</h3>
         <div class="row"><label for="zoom">放大倍率</label><output id="zoomVal">1.15</output>
           <input type="range" id="zoom" min="1" max="2" step="0.05" value="1.15"></div>
+        <!-- 人在畫面裡偏上或偏下 -->
+        <div class="row"><label for="offsetY">人物上下位置</label><output id="offsetYVal">0</output>
+          <input type="range" class="bipolar" id="offsetY" min="-1" max="1" step="0.05" value="0"></div>
+        <p class="hint-line">往左人會偏上，往右人會偏下；也可以直接在右邊預覽畫面上下拖曳</p>
         <div class="row"><label for="follow">跟隨速度</label><output id="followVal">0.08</output>
-          <input type="range" id="follow" min="0.02" max="0.5" step="0.01" value="0.26"></div>
+          <input type="range" id="follow" min="0.02" max="0.5" step="0.01" value="0.08"></div>
         <label class="check"><input type="checkbox" id="followY" checked> 上下也跟隨</label>
       </section>
 
@@ -348,9 +365,32 @@ video.addEventListener("loadedmetadata", () => {
   // H.264 要求寬高是偶數
   const w = Math.round(video.videoWidth * scale / 2) * 2, h = Math.round(video.videoHeight * scale / 2) * 2;
   canvas.width = w;  canvas.height = h;
-  preview.width = w; preview.height = h;
+  setOutputSize();   // 輸出畫面的大小改由「畫面比例」決定
   cam = { x: 0.5, y: 0.5 };
 });
+
+// ===== 畫面比例 =====
+// 回傳要的「寬 ÷ 高」；選原比例就用影片本身的比例
+function targetRatio() {
+  const v = document.querySelector('input[name="ratio"]:checked').value;
+  return v === "orig" ? video.videoWidth / video.videoHeight : parseFloat(v);
+}
+
+// 在原影片裡，能框出這個比例的最大範圍（還沒放大前）
+function baseCrop() {
+  const vw = video.videoWidth, vh = video.videoHeight, r = targetRatio();
+  return (vw / vh > r) ? { w: vh * r, h: vh }   // 影片比較寬：高度用滿，左右裁掉
+                       : { w: vw, h: vw / r };  // 影片比較窄：寬度用滿，上下裁掉
+}
+
+// 依比例設定輸出畫面的大小（長邊最多 1920，寬高保持偶數）
+function setOutputSize() {
+  if (!video.videoWidth) return;
+  const b = baseCrop();
+  const scale = Math.min(1, 1920 / Math.max(b.w, b.h));
+  preview.width = Math.round(b.w * scale / 2) * 2;
+  preview.height = Math.round(b.h * scale / 2) * 2;
+}
 
 // ===== 置中預覽 =====
 const preview = document.getElementById("preview");
@@ -377,7 +417,7 @@ const filterAmtEl = document.getElementById("filterAmt");
 filterAmtEl.oninput = () => document.getElementById("filterAmtVal").textContent = filterAmtEl.value;
 
 // 依強度在「原色」和「選的濾鏡」之間取中間值，組成瀏覽器看得懂的濾鏡字串
-// 【修改】先算出這次要用的各項數值，Chrome 和 Safari 兩種做法都用它
+// 先算出這次要用的各項數值，Chrome 和 Safari 兩種做法都用它
 function filterParams() {
   const p = PRESETS[currentFilter()], o = PRESETS.none;
   const k = parseFloat(filterAmtEl.value);
@@ -396,7 +436,7 @@ function filterString() {
          `sepia(${f.sepia}) hue-rotate(${f.hue}deg) grayscale(${f.gray})`;
 }
 
-// ===== 【新增】給 Safari 用的濾鏡：自己一個一個像素算顏色 =====
+// ===== 給 Safari 用的濾鏡：自己一個一個像素算顏色 =====
 // 每種調整都可以寫成一個「顏色轉換表」（3×3 的矩陣 + 加減的數值），
 // 把它們依序疊起來，最後每個像素只要算一次就好
 function colorMatrix() {
@@ -458,6 +498,30 @@ document.getElementById("resetAdj").onclick = () => {
   refreshIfPaused();
 };
 document.querySelectorAll('input[name="filter"]').forEach(r => r.onchange = refreshIfPaused);
+// 換比例時，重新設定輸出大小並更新預覽
+document.querySelectorAll('input[name="ratio"]').forEach(r => r.onchange = () => { setOutputSize(); refreshIfPaused(); });
+
+// ===== 人物上下位置 =====
+const offsetEl = document.getElementById("offsetY");
+function showOffset() { document.getElementById("offsetYVal").textContent = offsetEl.value; }
+offsetEl.addEventListener("input", () => { showOffset(); refreshIfPaused(); });
+
+// 在預覽畫面上按住上下拖曳，也能調整（往下拖，人就往下移）
+let dragFrom = null;
+preview.addEventListener("pointerdown", e => {
+  dragFrom = { y: e.clientY, v: parseFloat(offsetEl.value) };
+  preview.setPointerCapture(e.pointerId);
+});
+preview.addEventListener("pointermove", e => {
+  if (!dragFrom) return;
+  const h = preview.getBoundingClientRect().height;
+  const v = dragFrom.v + (e.clientY - dragFrom.y) / h * 2 / 0.7;   // 拖多少，人就大約移多少
+  offsetEl.value = Math.max(-1, Math.min(1, v)).toFixed(2);
+  showOffset();
+  refreshIfPaused();
+});
+preview.addEventListener("pointerup", () => { dragFrom = null; });
+
 filterAmtEl.addEventListener("input", refreshIfPaused);
 
 // 色溫、色調：像在畫面上蓋一層有顏色的透明玻璃紙，用「柔光」混合讓顏色自然地滲進去
@@ -480,7 +544,7 @@ function applyColorShift() {
   pctx.restore();
 }
 
-// 【修改】實際試畫一個紅點，看瀏覽器的畫布濾鏡有沒有作用（Safari 常常有這個屬性但沒效果）
+// 實際試畫一個紅點，看瀏覽器的畫布濾鏡有沒有作用（Safari 常常有這個屬性但沒效果）
 const CANVAS_FILTER_OK = (() => {
   const c = document.createElement("canvas");
   c.width = c.height = 1;
@@ -508,18 +572,21 @@ function renderPreview() {
     if (followYEl.checked) cam.y += (target.y - cam.y) * k;
   }
 
-  // 放大後要擷取的範圍（寬高都縮小成 1/zoom）
-  const cw = vw / zoom, ch = vh / zoom;
+  // 先依比例框出範圍，再依放大倍率縮小
+  const b = baseCrop();
+  const cw = b.w / zoom, ch = b.h / zoom;
   // 讓鏡頭中心對準人，但不能超出原影片邊界
   let cx = cam.x * vw - cw / 2;
-  let cy = (followYEl.checked ? cam.y : 0.5) * vh - ch / 2;
+  // 加上「人物上下位置」：數值越大，框框往上移，人就會出現在畫面比較下面
+  const offset = parseFloat(offsetEl.value) * 0.35 * ch;
+  let cy = (followYEl.checked ? cam.y : 0.5) * vh - ch / 2 - offset;
   cx = Math.max(0, Math.min(vw - cw, cx));
   cy = Math.max(0, Math.min(vh - ch, cy));
 
   if (CANVAS_FILTER_OK) pctx.filter = filterString();   // Chrome：直接用瀏覽器的濾鏡
   pctx.drawImage(video, cx, cy, cw, ch, 0, 0, preview.width, preview.height);
   pctx.filter = "none";
-  if (!CANVAS_FILTER_OK) applyFilterByPixels();   // 【新增】Safari：自己算
+  if (!CANVAS_FILTER_OK) applyFilterByPixels();   // Safari：自己算
   applyColorShift();   // 最後再調色溫、色調
 }
 
@@ -631,7 +698,7 @@ function seekTo(t) {
 
 function start0() { return picked ? picked.time : 0; }
 
-// 【新增】用開源套件 mp4box.js（GitHub: gpac/mp4box.js）讀出原影片裡的 AAC 聲音
+// 用開源套件 mp4box.js（GitHub: gpac/mp4box.js）讀出原影片裡的 AAC 聲音
 async function readOriginalAAC(file) {
   const mod = await import("https://cdn.jsdelivr.net/npm/mp4box@0.5.2/+esm");
   const MP4Box = mod.createFile ? mod : mod.default;
@@ -696,7 +763,7 @@ document.getElementById("exportBtn").addEventListener("click", async () => {
     if ((await AudioEncoder.isConfigSupported(cfg)).supported) acfg = cfg;
   } catch (err) { console.warn("無法重新編碼聲音", err); }
 
-  // 【新增】Safari 沒有聲音編碼器時：直接把原影片裡已經編好的 AAC 聲音搬過來，不重新編碼
+  // Safari 沒有聲音編碼器時：直接把原影片裡已經編好的 AAC 聲音搬過來，不重新編碼
   let aacCopy = null;
   if (!acfg) {
     try { aacCopy = await readOriginalAAC(currentFile, start0()); }
@@ -759,7 +826,7 @@ document.getElementById("exportBtn").addEventListener("click", async () => {
     }
     await aenc.flush();
   } else if (aacCopy) {
-    // 【新增】搬原本的聲音：只留選人時間點之後、影片長度以內的片段，時間改成從 0 開始
+    // 搬原本的聲音：只留選人時間點之後、影片長度以內的片段，時間改成從 0 開始
     const end = start + total / FPS;
     let first = true;
     for (const smp of aacCopy.samples) {

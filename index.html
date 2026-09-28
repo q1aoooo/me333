@@ -124,7 +124,10 @@
   body.has-video .playbar { display: flex; }
   .playbar #scrub { flex: 1; min-width: 60px; }
   .btn.round { width: 40px; height: 40px; padding: 0; border-radius: 50%; font-size: 15px; flex: none; }
-  #exportMini { display: none; }
+  /* 輸出按鈕放在播放列上，電腦和手機都看得到 */
+  #exportMini { flex: none; }
+  #downloadMini[hidden] { display: none; }
+  .player { display: contents; }   /* 電腦上不影響原本的排版 */
 
   /* 手機切換畫面的按鈕（電腦上不需要） */
   .viewtabs { display: none; }
@@ -224,7 +227,7 @@
     #dropzone { grid-column: 1; }
       .wordmark { font-size: 38px; }
     /* 手機上兩張小卡上下排，各自矮一點，不用滑很久 */
-    .frame video, .frame #preview { max-height: 52vh; }
+    .frame video, .frame #preview { max-height: 34vh; }   /* 畫面縮小一點，下面還看得到設定 */
     .frame { width: 100%; }
     .frame video, .frame #preview { margin: 0 auto; }
     .steps li { font-size: 13px; }
@@ -241,8 +244,17 @@
     .viewtabs button { flex: 1; border: 0; background: none; padding: 8px; font-weight: 700; cursor: pointer; }
     .viewtabs button.on { background: var(--ink); color: var(--paper); }
     body[data-view="source"] .frame.result, body[data-view="result"] .frame.source { display: none; }
-    .playbar { grid-column: 1; position: sticky; bottom: 10px; z-index: 10; }
-    #exportMini { display: inline-flex; flex: none; }
+    /* 播放區（切換鈕＋畫面＋播放列）固定在最上面 */
+    body.has-video .player {
+      display: flex; flex-direction: column; gap: 8px; grid-column: 1;
+      position: sticky; top: 0; z-index: 20; margin: 0 -16px; padding: 8px 16px 10px;
+      background: var(--paper); border-bottom: 2px solid var(--ink);
+    }
+    .frame { padding: 8px 8px 30px; box-shadow: none; }
+    .frame figcaption { bottom: 6px; font-size: 12px; }
+    .playbar { box-shadow: none; padding: 4px 8px 4px 4px; gap: 8px; }
+    .btn.round { width: 36px; height: 36px; }
+    #exportMini { padding: 6px 12px; font-size: 14px; }
     #timeDur { display: none; }
   }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
@@ -283,6 +295,8 @@
     </label>
     <input type="file" id="picker" accept="video/*" hidden>
 
+    <!-- 播放區：電腦上照原本排；手機上會固定在最上面，往下滑調設定時一樣看得到畫面 -->
+    <div class="player">
     <!-- 手機上一次只看一個畫面，用這兩顆按鈕切換 -->
     <div class="viewtabs">
       <button data-view="source" class="on">原始畫面</button>
@@ -303,13 +317,15 @@
       <figcaption><span>置中預覽</span><b>&lt;333*</b></figcaption>
     </figure>
 
-    <!-- 自己的播放列：播放／暫停、時間軸（手機上會固定在畫面最下面） -->
+    <!-- 自己的播放列：播放／暫停、時間軸、輸出 -->
     <div class="playbar">
       <button id="playBtn" class="btn primary round" aria-label="播放">▶</button>
       <span id="timeNow">0:00.0</span>
       <input type="range" id="scrub" min="0" max="1" step="0.001" value="0" aria-label="時間軸">
       <span id="timeDur">0:00.0</span>
-      <button id="exportMini" class="btn primary">輸出</button>
+      <button id="exportMini" class="btn primary">輸出影片</button>
+      <a id="downloadMini" class="btn" hidden>下載</a>
+    </div>
     </div>
 
     <!-- 設定面板 -->
@@ -381,7 +397,9 @@
         <button id="exportBtn" class="btn primary big">輸出影片</button>
         <div class="progress"><div id="progressBar"></div></div>
         <a id="download" class="btn" hidden>下載置中影片</a>
-        <p class="note">從點選人物的那一刻開始輸出到結尾，會一格一格處理，請等進度跑完。</p>
+        <!-- 輸出方式 -->
+        <label class="check"><input type="checkbox" id="exactExport"> 逐格模式（最穩定，但比較慢）</label>
+        <p class="note">一般會邊播放邊輸出，漏掉的畫面會自動退回補上，品質和逐格模式一樣但快很多。如果輸出還是有問題，再勾選逐格模式。</p>
       </section>
     </aside>
   </main>
@@ -1126,6 +1144,73 @@ async function readOriginalAAC(file) {
   return { sampleRate, numberOfChannels, description, samples };
 }
 
+// ===== 快速又不漏格的輸出：讓影片自己播放，每出現一格就處理一格 =====
+// 以前是一格一格「跳」到每個時間點，每跳一次都要等影片解碼，很慢。
+// 改成直接播放，影片本來就會一格一格送出畫面，我們只要跟著處理就好。
+// 每一格的時間用影片本身的時間；如果發現漏了格子，就退回去放慢重來，所以品質跟逐格模式一樣。
+async function exportByPlayback(start, venc) {
+  const end = video.duration;
+  const oldMuted = video.muted, oldRate = video.playbackRate;
+  video.muted = true;                             // 輸出時不出聲
+  let rate = IS_MOBILE ? 0.5 : 1;                 // 手機比較慢，先用半速播放
+  video.playbackRate = rate;
+  await seekTo(start);
+  let n = 0, lastTs = -1, lastT = start, lastKey = -Infinity, lastPresented = null, done = false, recovering = false;
+  // 開始播放前，先處理目前停著的第一格（不然播放後第一個收到的會是下一格）
+  syncPick(start);
+  if (activePick >= 0) { detect(); draw(); }
+  renderPreview();
+  { const f0 = new VideoFrame(preview, { timestamp: 0 }); venc.encode(f0, { keyFrame: true }); f0.close(); }
+  lastTs = 0; lastKey = start; n = 1;
+  await new Promise(resolve => {
+    const finish = () => { if (done) return; done = true; video.pause(); resolve(); };
+
+    // 發現漏格時：退回上一個處理好的畫面，放慢播放速度再繼續，保證每一格都處理到
+    const recover = async () => {
+      recovering = true;
+      video.pause();
+      rate = Math.max(0.1, rate * 0.7);
+      await seekTo(lastT);
+      video.playbackRate = rate;
+      lastPresented = null;
+      recovering = false;
+      video.requestVideoFrameCallback(onFrame);
+      video.play();
+    };
+
+    const onFrame = (now, meta) => {
+      if (done || recovering) return;
+      const t = meta.mediaTime;
+      if (t >= end - 0.001) { finish(); return; }
+      // presentedFrames 每出現一格畫面就加 1；一次跳 2 以上，代表中間有格子沒被處理到
+      if (lastPresented !== null && meta.presentedFrames - lastPresented > 1 && t > lastT + 0.001) { recover(); return; }
+      lastPresented = meta.presentedFrames;
+      const ts = Math.round((t - start) * 1e6);
+      if (ts > lastTs) {                           // 退回時會重複看到處理過的畫面，跳過就好
+        syncPick(t);
+        if (activePick >= 0 && n % DETECT_EVERY === 0) { detect(); draw(); }
+        renderPreview();
+        const frame = new VideoFrame(preview, { timestamp: Math.max(0, ts) });
+        const key = t - lastKey >= 2;              // 每 2 秒放一個關鍵格
+        if (key) lastKey = t;
+        venc.encode(frame, { keyFrame: key });
+        frame.close();
+        lastTs = ts; lastT = t;
+        n++;
+      }
+      const pct = Math.min(100, Math.round((t - start) / (end - start) * 100));
+      status.textContent = `輸出中 ${pct}%`;
+      document.getElementById("progressBar").style.width = pct + "%";
+      video.requestVideoFrameCallback(onFrame);
+    };
+    video.addEventListener("ended", () => { if (!recovering) finish(); });
+    video.requestVideoFrameCallback(onFrame);
+    video.play();
+  });
+  video.muted = oldMuted;
+  video.playbackRate = oldRate;
+}
+
 // 找瀏覽器支援的 H.264 設定（剪映、Wink 都讀得了）
 async function pickVideoConfig(w, h) {
   for (const codec of ["avc1.640028", "avc1.4d0028", "avc1.42e028"]) {
@@ -1145,6 +1230,7 @@ document.getElementById("exportBtn").addEventListener("click", async () => {
   setStep(4);
   document.body.classList.add("exporting");
   document.getElementById("download").hidden = true;
+  document.getElementById("downloadMini").hidden = true;
 
   const W = preview.width, H = preview.height;
   const vcfg = await pickVideoConfig(W, H);
@@ -1193,7 +1279,9 @@ document.getElementById("exportBtn").addEventListener("click", async () => {
   const firstCam = activePick >= 0 ? picks[activePick].pos : (manualCamAt(start) || { x: 0.5, y: 0.5 });
   cam = { x: firstCam.x, y: firstCam.y };
   const total = Math.floor((video.duration - start) * FPS);
-  for (let i = 0; i < total; i++) {
+  if (!document.getElementById("exactExport").checked) {
+    await exportByPlayback(start, venc);   // 預設：邊播放邊處理，快很多
+  } else for (let i = 0; i < total; i++) {   // 逐格模式：一格一格跳過去處理（最穩定）
     const t = start + i / FPS;
     await seekTo(t);
     syncPick(t);   // 依時間切換到對應的選人片段
@@ -1251,6 +1339,8 @@ document.getElementById("exportBtn").addEventListener("click", async () => {
   link.href = URL.createObjectURL(blob);
   link.download = "置中影片.mp4";
   link.hidden = false;
+  const mini = document.getElementById("downloadMini");   // 播放列上也放一個下載按鈕
+  mini.href = link.href; mini.download = link.download; mini.hidden = false;
   status.textContent = (acfg || aacCopy) ? "輸出完成！" : "輸出完成（這支影片的聲音讀不到，輸出的是無聲版本）";
   exporting = false;
   document.body.classList.remove("exporting");

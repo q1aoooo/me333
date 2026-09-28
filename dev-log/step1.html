@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<title>跳舞影片小工具｜第一步：找到身體中心</title>
+<style>
+  body { font-family: "PingFang TC", "Microsoft JhengHei", sans-serif; margin: 24px; color: #222; }
+  #stage { position: relative; display: inline-block; margin-top: 12px; }
+  #stage video, #stage canvas { display: block; max-height: 80vh; }
+  #stage canvas { position: absolute; left: 0; top: 0; width: 100%; height: 100%; }
+  #status { margin-left: 12px; color: #666; }
+</style>
+</head>
+<body>
+  <input type="file" id="picker" accept="video/*">
+  <span id="status">模型載入中…</span>
+  <div id="stage">
+    <video id="video" controls playsinline></video>
+    <canvas id="overlay"></canvas>
+  </div>
+
+<script type="module">
+// 1. 從網路載入 MediaPipe 的姿勢偵測套件
+import { PoseLandmarker, FilesetResolver, DrawingUtils }
+  from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+
+const video   = document.getElementById("video");
+const canvas  = document.getElementById("overlay");
+const ctx     = canvas.getContext("2d");
+const status  = document.getElementById("status");
+const drawer  = new DrawingUtils(ctx);
+
+// 2. 建立姿勢偵測器（lite 版模型，速度快、準確度夠用）
+const vision = await FilesetResolver.forVisionTasks(
+  "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+const pose = await PoseLandmarker.createFromOptions(vision, {
+  baseOptions: {
+    modelAssetPath: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
+  },
+  runningMode: "VIDEO",   // 影片模式：一格一格連續偵測
+  numPoses: 1,            // 只抓一個人
+});
+status.textContent = "模型載入完成，請選擇一支跳舞影片";
+
+// 3. 選好影片後放進 <video>
+document.getElementById("picker").addEventListener("change", (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  video.src = URL.createObjectURL(file);
+  status.textContent = "按播放開始偵測";
+});
+
+// 影片尺寸確定後，讓畫布和影片一樣大
+video.addEventListener("loadedmetadata", () => {
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+});
+
+// 4. 算身體中心：取左右肩（11、12）和左右髖（23、24）四個點的平均
+function bodyCenter(lm) {
+  const ids = [11, 12, 23, 24];
+  const x = ids.reduce((sum, i) => sum + lm[i].x, 0) / ids.length;
+  const y = ids.reduce((sum, i) => sum + lm[i].y, 0) / ids.length;
+  return { x, y };   // 0~1 之間的比例座標
+}
+
+// 5. 每一格畫面：偵測姿勢 → 畫骨架 → 畫身體中心
+let lastTime = -1;
+function onFrame() {
+  if (!video.paused && video.currentTime !== lastTime) {
+    lastTime = video.currentTime;
+    const result = pose.detectForVideo(video, performance.now());
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    if (result.landmarks.length > 0) {
+      const lm = result.landmarks[0];
+      drawer.drawConnectors(lm, PoseLandmarker.POSE_CONNECTIONS, { color: "#ffffff", lineWidth: 3 });
+      drawer.drawLandmarks(lm, { color: "#ff4d8d", radius: 4 });
+
+      const c = bodyCenter(lm);
+      ctx.fillStyle = "#ffd400";
+      ctx.beginPath();
+      ctx.arc(c.x * canvas.width, c.y * canvas.height, 12, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  requestAnimationFrame(onFrame);
+}
+requestAnimationFrame(onFrame);
+</script>
+</body>
+</html>

@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<title>跳舞影片小工具｜第四步：重拍自動放大</title>
+<style>
+  body { font-family: "PingFang TC", "Microsoft JhengHei", sans-serif; margin: 24px; color: #222; }
+  #stage { position: relative; display: inline-block; margin-top: 12px; }
+  #stage video, #stage canvas { display: block; max-height: 80vh; }
+  #stage canvas { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; }
+  /* 選人模式時，讓畫布可以被點擊 */
+  #stage.picking canvas { pointer-events: auto; cursor: crosshair; }
+  #status { margin-left: 12px; color: #666; }
+  button { margin-left: 8px; }
+  /* 原始影片和置中預覽並排 */
+  #row { display: flex; gap: 24px; align-items: flex-start; }
+  #preview { display: block; max-height: 80vh; margin-top: 12px; background: #000; }
+  #controls { margin-top: 12px; line-height: 2; }
+  #controls label { margin-right: 20px; }
+  /* 重拍時間軸 */
+  #beatPanel { margin-top: 16px; max-width: 1200px; }
+  #beatPanel label { margin: 0 16px; }
+  #timeline { display: block; width: 100%; height: 120px; margin-top: 10px; background: #f3f3f3; cursor: pointer; }
+  .hint { color: #888; font-size: 14px; }
+  #beatList { width: 100%; font-family: monospace; }
+</style>
+</head>
+<body>
+  <input type="file" id="picker" accept="video/*">
+  <button id="pickBtn">選擇要追蹤的人</button>
+  <span id="status">模型載入中…</span>
+  <!-- 可調整的設定 -->
+  <div id="controls">
+    <label>放大倍率 <input type="range" id="zoom" min="1" max="2" step="0.05" value="1.15"> <span id="zoomVal">1.15</span></label>
+    <label>跟隨速度 <input type="range" id="follow" min="0.02" max="0.5" step="0.01" value="0.26"> <span id="followVal">0.26</span></label>
+    <label><input type="checkbox" id="followY" checked> 上下也跟隨</label>
+    <br>
+    <!-- 【新增】卡點放大 -->
+    <label><input type="checkbox" id="punchOn" checked> 重拍放大</label>
+    <label>放大幅度 <input type="range" id="punchAmt" min="1.02" max="1.4" step="0.01" value="1.12"> <span id="punchAmtVal">1.12</span></label>
+    <label>彈回時間（秒） <input type="range" id="punchDur" min="0.1" max="0.6" step="0.05" value="0.25"> <span id="punchDurVal">0.25</span></label>
+  </div>
+  <div id="row">
+    <div id="stage">
+      <video id="video" controls playsinline></video>
+      <canvas id="overlay"></canvas>
+    </div>
+    <!-- 置中後的預覽畫面 -->
+    <canvas id="preview"></canvas>
+  </div>
+
+  <!-- 音樂重拍 -->
+  <div id="beatPanel">
+    <button id="analyzeBtn">分析音樂重拍</button>
+    <label>篩選嚴格度 <input type="range" id="sens" min="0.5" max="3" step="0.1" value="1.5"> <span id="sensVal">1.5</span></label>
+    <span id="beatInfo"></span>
+    <canvas id="timeline" height="120"></canvas>
+    <p class="hint">點粉紅色的線可以取消（變灰），再點一次恢復；點空白處可以跳到那個時間。播放時，保留的重拍會讓右邊預覽閃一下粉紅框。</p>
+    <textarea id="beatList" rows="5" readonly></textarea>
+    <button id="copyBtn">複製重拍時間</button>
+  </div>
+
+<script type="module">
+import { PoseLandmarker, FilesetResolver, DrawingUtils }
+  from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+
+const video  = document.getElementById("video");
+const canvas = document.getElementById("overlay");
+const ctx    = canvas.getContext("2d");
+const status = document.getElementById("status");
+const stage  = document.getElementById("stage");
+const drawer = new DrawingUtils(ctx);
+
+const vision = await FilesetResolver.forVisionTasks(
+  "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+const pose = await PoseLandmarker.createFromOptions(vision, {
+  baseOptions: {
+    modelAssetPath: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
+  },
+  runningMode: "VIDEO",
+  numPoses: 3,   // 【修改】最多同時偵測 3 個人
+});
+status.textContent = "模型載入完成，請選擇一支跳舞影片";
+
+document.getElementById("picker").addEventListener("change", (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  video.src = URL.createObjectURL(file);
+  target = null;
+  currentFile = file;          // 記住檔案，分析聲音時要用
+  strength = []; beats = [];   // 換影片就清空舊的重拍
+  drawTimeline(); updateList();
+  status.textContent = "先暫停在看得到你的畫面，按「選擇要追蹤的人」後點你自己";
+});
+
+video.addEventListener("loadedmetadata", () => {
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  preview.width = video.videoWidth;     // 預覽和原影片一樣的比例
+  preview.height = video.videoHeight;
+  cam = { x: 0.5, y: 0.5 };
+});
+
+// ===== 置中預覽 =====
+const preview = document.getElementById("preview");
+const pctx = preview.getContext("2d");
+const zoomEl = document.getElementById("zoom");
+const followEl = document.getElementById("follow");
+const followYEl = document.getElementById("followY");
+zoomEl.oninput = () => document.getElementById("zoomVal").textContent = zoomEl.value;
+followEl.oninput = () => document.getElementById("followVal").textContent = followEl.value;
+
+// 「鏡頭」目前對準的位置（比例座標），會慢慢追向人的身體中心
+let cam = { x: 0.5, y: 0.5 };
+
+function renderPreview() {
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (!vw) return;
+  const zoom = parseFloat(zoomEl.value) * punchFactor(video.currentTime);   // 【新增】乘上卡點放大
+  const k = parseFloat(followEl.value);
+
+  // 平滑：每一格只往目標移動一小段，數字越大跟得越快、越不平滑
+  if (target) {
+    cam.x += (target.x - cam.x) * k;
+    if (followYEl.checked) cam.y += (target.y - cam.y) * k;
+  }
+
+  // 放大後要擷取的範圍（寬高都縮小成 1/zoom）
+  const cw = vw / zoom, ch = vh / zoom;
+  // 讓鏡頭中心對準人，但不能超出原影片邊界
+  let cx = cam.x * vw - cw / 2;
+  let cy = (followYEl.checked ? cam.y : 0.5) * vh - ch / 2;
+  cx = Math.max(0, Math.min(vw - cw, cx));
+  cy = Math.max(0, Math.min(vh - ch, cy));
+
+  pctx.drawImage(video, cx, cy, cw, ch, 0, 0, preview.width, preview.height);
+
+  // 【修改】關掉「重拍放大」時，才用粉紅框提示重拍位置
+  const t = video.currentTime;
+  if (!punchOnEl.checked && beats.some(b => b.keep && t >= b.t && t - b.t < 0.1)) {
+    pctx.lineWidth = 16;
+    pctx.strokeStyle = "#ff4d8d";
+    pctx.strokeRect(0, 0, preview.width, preview.height);
+  }
+}
+
+// ===== 【新增】卡點放大 =====
+const punchOnEl = document.getElementById("punchOn");
+const punchAmtEl = document.getElementById("punchAmt");
+const punchDurEl = document.getElementById("punchDur");
+punchAmtEl.oninput = () => document.getElementById("punchAmtVal").textContent = punchAmtEl.value;
+punchDurEl.oninput = () => document.getElementById("punchDurVal").textContent = punchDurEl.value;
+
+// 算出這個時間點要額外放大多少：重拍那一瞬間放到最大，接著慢慢彈回 1
+function punchFactor(t) {
+  if (!punchOnEl.checked) return 1;
+  const amt = parseFloat(punchAmtEl.value);
+  const dur = parseFloat(punchDurEl.value);
+  // 找出「已經經過、而且最近的」那個保留重拍
+  let last = null;
+  for (const b of beats) {
+    if (b.keep && b.t <= t) last = b;
+  }
+  if (!last) return 1;
+  const dt = t - last.t;          // 距離重拍過了幾秒
+  if (dt > dur) return 1;         // 已經彈回來了
+  const p = 1 - dt / dur;         // 從 1 慢慢降到 0
+  return 1 + (amt - 1) * p * p;   // 平方讓彈回的過程先快後慢
+}
+
+// ===== 音樂重拍 =====
+const HOP = 0.01;        // 每 0.01 秒（10 毫秒）算一次
+let currentFile = null;
+let strength = [];       // 每一小段「突然變大聲」的程度
+let beats = [];          // 重拍候選：{ t: 秒數, keep: 要不要保留 }
+
+const sensEl = document.getElementById("sens");
+const beatInfo = document.getElementById("beatInfo");
+const timeline = document.getElementById("timeline");
+const tctx = timeline.getContext("2d");
+const beatList = document.getElementById("beatList");
+
+async function analyze() {
+  if (!currentFile) { beatInfo.textContent = "請先選擇影片"; return; }
+  beatInfo.textContent = "分析中…";
+  try {
+    // 1. 把影片裡的聲音解碼出來
+    const actx = new AudioContext();
+    const audio = await actx.decodeAudioData(await currentFile.arrayBuffer());
+    actx.close();
+
+    // 2. 只留下低音（鼓、貝斯），重拍通常在這裡
+    const off = new OfflineAudioContext(1, audio.length, audio.sampleRate);
+    const src = off.createBufferSource();
+    src.buffer = audio;
+    const lowpass = off.createBiquadFilter();
+    lowpass.type = "lowpass";
+    lowpass.frequency.value = 150;
+    src.connect(lowpass);
+    lowpass.connect(off.destination);
+    src.start();
+    const low = (await off.startRendering()).getChannelData(0);
+
+    // 3. 每 10 毫秒算一次音量
+    const hop = Math.round(audio.sampleRate * HOP);
+    const energy = [];
+    for (let i = 0; i + hop <= low.length; i += hop) {
+      let sum = 0;
+      for (let j = i; j < i + hop; j++) sum += low[j] * low[j];
+      energy.push(Math.sqrt(sum / hop));
+    }
+
+    // 4. 「突然變大聲」的程度：比上一段大聲多少（變小聲就算 0）
+    strength = energy.map((e, i) => Math.max(0, e - (i > 0 ? energy[i - 1] : e)));
+    pickBeats();
+  } catch (err) {
+    console.error(err);
+    beatInfo.textContent = "讀不到這支影片的聲音，可以試試用 Safari 開，或先把影片轉成 mp4";
+  }
+}
+
+// 5. 挑出重拍：要比附近明顯突出，而且兩個重拍不能靠太近
+function pickBeats() {
+  const sens = parseFloat(sensEl.value);
+  const WIN = 50;       // 和前後 0.5 秒比較
+  const MIN_GAP = 25;   // 兩個重拍至少隔 0.25 秒
+  beats = [];
+  let last = -Infinity;
+  for (let i = 1; i < strength.length - 1; i++) {
+    const s = strength[i];
+    if (s <= strength[i - 1] || s < strength[i + 1]) continue;   // 不是最高點就跳過
+    const a = Math.max(0, i - WIN), b = Math.min(strength.length, i + WIN);
+    let mean = 0;
+    for (let j = a; j < b; j++) mean += strength[j];
+    mean /= (b - a);
+    let v = 0;
+    for (let j = a; j < b; j++) v += (strength[j] - mean) ** 2;
+    const sd = Math.sqrt(v / (b - a));
+    // 比附近平均高出「嚴格度 × 標準差」才算重拍
+    if (s > mean + sens * sd && i - last >= MIN_GAP) {
+      beats.push({ t: i * HOP, keep: true });
+      last = i;
+    }
+  }
+  drawTimeline();
+  updateList();
+}
+
+function audioDuration() { return strength.length * HOP; }
+
+// 時間軸：灰色是變大聲的程度，粉紅線是保留的重拍，灰線是取消的，黑線是播放位置
+function drawTimeline() {
+  const W = timeline.clientWidth, H = timeline.height;
+  timeline.width = W;
+  tctx.clearRect(0, 0, W, H);
+  const dur = audioDuration();
+  if (!dur) return;
+  const maxS = strength.reduce((m, v) => Math.max(m, v), 0) || 1;
+  tctx.fillStyle = "#cfcfcf";
+  for (let x = 0; x < W; x++) {
+    const h = (strength[Math.floor(x / W * strength.length)] || 0) / maxS * (H - 10);
+    tctx.fillRect(x, H - h, 1, h);
+  }
+  beats.forEach(b => {
+    tctx.fillStyle = b.keep ? "#ff4d8d" : "#b5b5b5";
+    tctx.fillRect(b.t / dur * W - 1.5, 0, 3, H);
+  });
+  tctx.fillStyle = "#222";
+  tctx.fillRect(video.currentTime / dur * W - 1, 0, 2, H);
+}
+
+// 時間格式：分:秒.兩位小數
+function fmt(t) {
+  const m = Math.floor(t / 60);
+  const sec = (t % 60).toFixed(2).padStart(5, "0");
+  return `${m}:${sec}`;
+}
+
+function updateList() {
+  const kept = beats.filter(b => b.keep);
+  beatList.value = kept.map(b => fmt(b.t)).join("\n");
+  if (strength.length) beatInfo.textContent = `找到 ${beats.length} 個候選，保留 ${kept.length} 個`;
+}
+
+// 點時間軸：點到重拍線就切換保留／取消，點空白處就跳到那個時間
+timeline.addEventListener("click", (e) => {
+  const dur = audioDuration();
+  if (!dur) return;
+  const rect = timeline.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  let near = null, nd = Infinity;
+  beats.forEach(b => {
+    const d = Math.abs(b.t / dur * rect.width - x);
+    if (d < nd) { nd = d; near = b; }
+  });
+  if (near && nd <= 6) {
+    near.keep = !near.keep;
+    updateList();
+  } else {
+    video.currentTime = x / rect.width * dur;
+  }
+  drawTimeline();
+});
+
+document.getElementById("analyzeBtn").addEventListener("click", analyze);
+sensEl.oninput = () => {
+  document.getElementById("sensVal").textContent = sensEl.value;
+  if (strength.length) pickBeats();   // 調嚴格度會重新挑（手動取消的會重置）
+};
+document.getElementById("copyBtn").addEventListener("click", () => {
+  beatList.select();
+  document.execCommand("copy");
+  beatInfo.textContent = "已複製重拍時間";
+});
+
+
+// 身體中心（可以改成你上一步選的點）
+const CENTER_IDS = [11, 12, 23, 24];
+function bodyCenter(lm) {
+  const x = CENTER_IDS.reduce((s, i) => s + lm[i].x, 0) / CENTER_IDS.length;
+  const y = CENTER_IDS.reduce((s, i) => s + lm[i].y, 0) / CENTER_IDS.length;
+  return { x, y };
+}
+
+// 兩個點之間的距離（比例座標）
+function dist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
+
+// 要追蹤的人：記住他上一格的身體中心
+let target = null;
+// 一格之內最多能移動多遠，超過就當作「跟丟了」
+const MAX_JUMP = 0.15;
+
+let people = [];   // 這一格偵測到的所有人
+
+// 在人群中找出離 target 最近的那個人
+function findTarget() {
+  if (!target || people.length === 0) return -1;
+  let best = -1, bestD = Infinity;
+  people.forEach((lm, i) => {
+    const d = dist(bodyCenter(lm), target);
+    if (d < bestD) { bestD = d; best = i; }
+  });
+  return bestD < MAX_JUMP ? best : -1;
+}
+
+function detect() {
+  const result = pose.detectForVideo(video, performance.now());
+  people = result.landmarks;
+}
+
+function draw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const idx = findTarget();
+  people.forEach((lm, i) => {
+    const isTarget = i === idx;
+    // 追蹤中的人畫粉紅色，其他人畫淡灰色
+    drawer.drawConnectors(lm, PoseLandmarker.POSE_CONNECTIONS,
+      { color: isTarget ? "#ff4d8d" : "rgba(255,255,255,0.35)", lineWidth: isTarget ? 4 : 2 });
+  });
+  if (idx >= 0) {
+    target = bodyCenter(people[idx]);   // 更新位置，下一格用
+    ctx.fillStyle = "#ffd400";
+    ctx.beginPath();
+    ctx.arc(target.x * canvas.width, target.y * canvas.height, 12, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (target) {
+    status.textContent = "這一格跟丟了，可以暫停後重新選人";
+  }
+}
+
+// 選人：按按鈕進入選人模式，點畫面上的人
+document.getElementById("pickBtn").addEventListener("click", () => {
+  video.pause();
+  detect();
+  target = null;
+  draw();
+  stage.classList.add("picking");
+  status.textContent = "點一下你要追蹤的人";
+});
+
+canvas.addEventListener("click", (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const click = { x: (e.clientX - rect.left) / rect.width,
+                  y: (e.clientY - rect.top) / rect.height };
+  // 選離點擊位置最近的人
+  let best = null, bestD = Infinity;
+  people.forEach((lm) => {
+    const d = dist(bodyCenter(lm), click);
+    if (d < bestD) { bestD = d; best = bodyCenter(lm); }
+  });
+  if (best) {
+    target = best;
+    cam = { ...best };   // 選好人時鏡頭直接對準，不用慢慢滑過去
+    stage.classList.remove("picking");
+    status.textContent = "已選好，按播放開始追蹤";
+    draw();
+    renderPreview();
+  }
+});
+
+let lastTime = -1;
+function onFrame() {
+  if (!video.paused && video.currentTime !== lastTime) {
+    lastTime = video.currentTime;
+    detect();
+    draw();
+    renderPreview();
+  }
+  if (strength.length) drawTimeline();   // 時間軸上的播放位置跟著動
+  requestAnimationFrame(onFrame);
+}
+requestAnimationFrame(onFrame);
+</script>
+</body>
+</html>

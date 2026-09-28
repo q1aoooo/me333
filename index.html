@@ -758,8 +758,57 @@ function bodySize(lm) {
 let target = null;   // { x, y, size, vx, vy }
 function makeTarget(lm) {
   const c = bodyCenter(lm);
-  return { x: c.x, y: c.y, size: bodySize(lm), vx: 0, vy: 0 };
+  // 多記住這個人「衣服的顏色」，用來分辨靠很近的不同人
+  return { x: c.x, y: c.y, size: bodySize(lm), vx: 0, vy: 0, look: appearance(lm) };
 }
+
+// ===== 用衣服顏色分辨是不是同一個人 =====
+// 每次偵測時，把畫面縮小存一份，從裡面取身體和大腿區域的平均顏色
+const sampler = document.createElement("canvas");
+const sctx = sampler.getContext("2d", { willReadFrequently: true });
+let frameImg = null;
+function grabFrame() {
+  const w = 160, h = Math.max(1, Math.round(160 * video.videoHeight / video.videoWidth));
+  sampler.width = w; sampler.height = h;
+  sctx.drawImage(video, 0, 0, w, h);
+  frameImg = sctx.getImageData(0, 0, w, h);
+}
+
+// 在四個關節圍成的區域裡，平均取 25 個點的顏色
+function regionColor(p1, p2, p3, p4) {
+  const { width: w, height: h, data } = frameImg;
+  let r = 0, g = 0, b = 0, n = 0;
+  for (let u = 0.1; u < 1; u += 0.2) {
+    for (let v = 0.1; v < 1; v += 0.2) {
+      const tx = p1.x + (p2.x - p1.x) * u, ty = p1.y + (p2.y - p1.y) * u;   // 上邊
+      const bx = p4.x + (p3.x - p4.x) * u, by = p4.y + (p3.y - p4.y) * u;   // 下邊
+      const x = Math.round((tx + (bx - tx) * v) * (w - 1)), y = Math.round((ty + (by - ty) * v) * (h - 1));
+      if (x < 0 || y < 0 || x >= w || y >= h) continue;
+      const i = (y * w + x) * 4;
+      r += data[i]; g += data[i + 1]; b += data[i + 2]; n++;
+    }
+  }
+  return n ? [r / n, g / n, b / n] : null;
+}
+
+// 一個人的「樣子」：上半身（肩膀到髖部）和大腿（髖部到膝蓋）的顏色
+function appearance(lm) {
+  if (!frameImg) return null;
+  const torso = regionColor(lm[11], lm[12], lm[24], lm[23]);
+  const kneesSeen = (lm[25].visibility ?? 1) > 0.5 && (lm[26].visibility ?? 1) > 0.5;
+  const legs = kneesSeen ? regionColor(lm[23], lm[24], lm[26], lm[25]) : null;
+  return { torso, legs };
+}
+
+// 兩個人的顏色差多少（0 = 一模一樣，大約 0.3 以上就很不一樣）
+function lookDiff(a, b) {
+  if (!a || !b || !a.torso || !b.torso) return 0;
+  const d = (c1, c2) => Math.hypot(c1[0] - c2[0], c1[1] - c2[1], c1[2] - c2[2]) / 441.7;
+  const parts = [d(a.torso, b.torso)];
+  if (a.legs && b.legs) parts.push(d(a.legs, b.legs));
+  return parts.reduce((x, y) => x + y, 0) / parts.length;
+}
+const LOOK_LIMIT = 0.2;   // 顏色差超過這個，就不當作同一個人
 // 能接受的差距：以「一個軀幹長」為單位，遠近的人都適用（取代原本固定的 0.15）
 const MATCH_LIMIT = 1.0;
 let lostCount = 0;   // 連續幾次沒找到人
@@ -784,11 +833,26 @@ function findTarget() {
   people.forEach((lm, i) => {
     const moved = dist(bodyCenter(lm), pred) / target.size;               // 移動了幾個軀幹長
     const sizeDiff = Math.abs(bodySize(lm) - target.size) / target.size;  // 大小差多少
-    const cost = moved + 0.7 * sizeDiff;
+    const colorDiff = lookDiff(appearance(lm), target.look);               // 衣服顏色差多少
+    if (colorDiff > LOOK_LIMIT) return;                                    // 顏色差太多，一定不是他
+    const cost = moved + 0.7 * sizeDiff + 3 * colorDiff;
     if (cost < bestCost) { bestCost = cost; best = i; }
   });
-  // 鎖定：就算跟丟也不放寬條件，只接受在最後位置附近、大小也差不多的人
-  return bestCost < MATCH_LIMIT ? best : -1;
+  if (bestCost < MATCH_LIMIT) return best;
+  // 跟丟之後：人可能已經走遠了，所以放寬距離（3 個軀幹長），
+  // 但一定要衣服顏色很像，而且附近沒有其他「也很像」的人，才接回來，避免認錯
+  if (lostCount > LOST_GRACE) {
+    const cands = [];
+    people.forEach((lm, i) => {
+      const colorDiff = lookDiff(appearance(lm), target.look);
+      if (colorDiff > LOOK_LIMIT * 0.75) return;
+      const moved = dist(bodyCenter(lm), target) / target.size;
+      if (moved < MATCH_LIMIT * 3) cands.push({ i, score: moved + 5 * colorDiff });
+    });
+    cands.sort((a, b) => a.score - b.score);
+    if (cands.length === 1 || (cands.length > 1 && cands[1].score - cands[0].score > 0.8)) return cands[0].i;
+  }
+  return -1;
 }
 
 // 更新追蹤的位置：只往新位置靠近一部分，濾掉骨架的小抖動
@@ -802,11 +866,19 @@ function updateTarget(lm) {
   target.x = nx;
   target.y = ny;
   target.size = target.size * 0.8 + bodySize(lm) * 0.2;
+  // 顏色也慢慢更新（燈光會變），但只更新一點點，避免被別人帶走
+  const now = appearance(lm);
+  if (now && now.torso && target.look && target.look.torso) {
+    const mix = (a, b) => a.map((v, i) => v * 0.95 + b[i] * 0.05);
+    target.look.torso = mix(target.look.torso, now.torso);
+    if (now.legs && target.look.legs) target.look.legs = mix(target.look.legs, now.legs);
+  }
 }
 
 function detect() {
   const result = pose.detectForVideo(video, performance.now());
   people = result.landmarks;
+  grabFrame();   // 存一份縮小的畫面，用來取衣服顏色
 }
 
 function draw() {
@@ -867,7 +939,7 @@ canvas.addEventListener("click", (e) => {
     // 加入一筆選人紀錄（同一個時間點就覆蓋），之後的片段就鎖定這個人
     const t = video.currentTime;
     picks = picks.filter(p => Math.abs(p.time - t) > 0.05);
-    picks.push({ time: t, pos: { ...best } });
+    picks.push({ time: t, pos: clonePos(best) });
     picks.sort((a, b) => a.time - b.time);
     activePick = -2;          // 強制重新同步
     syncPick(t);
@@ -896,12 +968,18 @@ function pickIndexAt(t) {
   return idx;
 }
 
+// 複製一份選人紀錄（連顏色也複製，避免追蹤時改到原本的紀錄）
+function clonePos(p) {
+  const look = p.look ? { torso: p.look.torso && [...p.look.torso], legs: p.look.legs && [...p.look.legs] } : null;
+  return { ...p, look };
+}
+
 // 換到新的選人區段時，從那次選人的位置重新開始鎖定
 function syncPick(t) {
   const idx = pickIndexAt(t);
   if (idx !== activePick) {
     activePick = idx;
-    target = idx >= 0 ? { ...picks[idx].pos } : null;
+    target = idx >= 0 ? clonePos(picks[idx].pos) : null;
     lostCount = 0;
     lostSince = null;
     lostCam = null;

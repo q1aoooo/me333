@@ -246,7 +246,7 @@
         <h3>追蹤</h3>
         <div class="row"><label for="zoom">放大倍率</label><output id="zoomVal">1.15</output>
           <input type="range" id="zoom" min="1" max="2" step="0.05" value="1.15"></div>
-        <div class="row"><label for="follow">跟隨速度</label><output id="followVal">0.26</output>
+        <div class="row"><label for="follow">跟隨速度</label><output id="followVal">0.08</output>
           <input type="range" id="follow" min="0.02" max="0.5" step="0.01" value="0.26"></div>
         <label class="check"><input type="checkbox" id="followY" checked> 上下也跟隨</label>
       </section>
@@ -377,15 +377,69 @@ const filterAmtEl = document.getElementById("filterAmt");
 filterAmtEl.oninput = () => document.getElementById("filterAmtVal").textContent = filterAmtEl.value;
 
 // 依強度在「原色」和「選的濾鏡」之間取中間值，組成瀏覽器看得懂的濾鏡字串
-function filterString() {
+// 【修改】先算出這次要用的各項數值，Chrome 和 Safari 兩種做法都用它
+function filterParams() {
   const p = PRESETS[currentFilter()], o = PRESETS.none;
   const k = parseFloat(filterAmtEl.value);
   const mix = key => o[key] + (p[key] - o[key]) * k;
   // 曝光和對比：乘在濾鏡的亮度、對比上（滑桿 -1～1 對應 0.5 倍～1.5 倍）
-  const exposure = 1 + adj("adjExposure") * 0.5;
-  const contrast = 1 + adj("adjContrast") * 0.5;
-  return `brightness(${mix("brightness") * exposure}) contrast(${mix("contrast") * contrast}) saturate(${mix("saturate")}) ` +
-         `sepia(${mix("sepia")}) hue-rotate(${mix("hue")}deg) grayscale(${mix("gray")})`;
+  return {
+    brightness: mix("brightness") * (1 + adj("adjExposure") * 0.5),
+    contrast:   mix("contrast")   * (1 + adj("adjContrast") * 0.5),
+    saturate: mix("saturate"), sepia: mix("sepia"), hue: mix("hue"), gray: mix("gray"),
+  };
+}
+
+function filterString() {
+  const f = filterParams();
+  return `brightness(${f.brightness}) contrast(${f.contrast}) saturate(${f.saturate}) ` +
+         `sepia(${f.sepia}) hue-rotate(${f.hue}deg) grayscale(${f.gray})`;
+}
+
+// ===== 【新增】給 Safari 用的濾鏡：自己一個一個像素算顏色 =====
+// 每種調整都可以寫成一個「顏色轉換表」（3×3 的矩陣 + 加減的數值），
+// 把它們依序疊起來，最後每個像素只要算一次就好
+function colorMatrix() {
+  const f = filterParams();
+  let M = [1,0,0, 0,1,0, 0,0,1], O = [0,0,0];   // 一開始是「不改變」
+  // 疊上一個新的轉換：新顏色 = m × 舊顏色 + o
+  const apply = (m, o = [0,0,0]) => {
+    const N = new Array(9), P = new Array(3);
+    for (let r = 0; r < 3; r++) {
+      for (let c = 0; c < 3; c++) N[r*3+c] = m[r*3]*M[c] + m[r*3+1]*M[3+c] + m[r*3+2]*M[6+c];
+      P[r] = m[r*3]*O[0] + m[r*3+1]*O[1] + m[r*3+2]*O[2] + o[r];
+    }
+    M = N; O = P;
+  };
+  const mixWithIdentity = (m, a) => m.map((v, i) => (i % 4 === 0 ? 1 : 0) * (1 - a) + v * a);
+  const b = f.brightness; apply([b,0,0, 0,b,0, 0,0,b]);                                   // 亮度
+  const c = f.contrast, co = 127.5 * (1 - c); apply([c,0,0, 0,c,0, 0,0,c], [co,co,co]);   // 對比
+  const sa = f.saturate;                                                                    // 飽和度
+  apply([0.213+0.787*sa, 0.715-0.715*sa, 0.072-0.072*sa,
+         0.213-0.213*sa, 0.715+0.285*sa, 0.072-0.072*sa,
+         0.213-0.213*sa, 0.715-0.715*sa, 0.072+0.928*sa]);
+  apply(mixWithIdentity([0.393,0.769,0.189, 0.349,0.686,0.168, 0.272,0.534,0.131], f.sepia));   // 偏棕
+  const h = f.hue * Math.PI / 180, cs = Math.cos(h), sn = Math.sin(h);                      // 色相
+  apply([0.213+cs*0.787-sn*0.213, 0.715-cs*0.715-sn*0.715, 0.072-cs*0.072+sn*0.928,
+         0.213-cs*0.213+sn*0.143, 0.715+cs*0.285+sn*0.140, 0.072-cs*0.072-sn*0.283,
+         0.213-cs*0.213-sn*0.787, 0.715-cs*0.715+sn*0.715, 0.072+cs*0.928+sn*0.072]);
+  apply(mixWithIdentity([0.2126,0.7152,0.0722, 0.2126,0.7152,0.0722, 0.2126,0.7152,0.0722], f.gray));   // 黑白
+  return { M, O };
+}
+
+function applyFilterByPixels() {
+  const { M, O } = colorMatrix();
+  const isIdentity = M.every((v, i) => Math.abs(v - (i % 4 === 0 ? 1 : 0)) < 1e-3) && O.every(v => Math.abs(v) < 0.5);
+  if (isIdentity) return;   // 沒有要調整就跳過，省時間
+  const img = pctx.getImageData(0, 0, preview.width, preview.height);
+  const d = img.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const r = d[i], g = d[i+1], b = d[i+2];
+    d[i]   = M[0]*r + M[1]*g + M[2]*b + O[0];   // 超出 0～255 的會自動被截掉
+    d[i+1] = M[3]*r + M[4]*g + M[5]*b + O[1];
+    d[i+2] = M[6]*r + M[7]*g + M[8]*b + O[2];
+  }
+  pctx.putImageData(img, 0, 0);
 }
 
 // ===== 手動調整 =====
@@ -426,10 +480,18 @@ function applyColorShift() {
   pctx.restore();
 }
 
-// 有些舊版瀏覽器的畫布不支援濾鏡，先提醒
-if (!("filter" in pctx)) {
-  document.getElementById("filterWarn").textContent = "這個瀏覽器不支援濾鏡，請改用新版 Chrome";
-}
+// 【修改】實際試畫一個紅點，看瀏覽器的畫布濾鏡有沒有作用（Safari 常常有這個屬性但沒效果）
+const CANVAS_FILTER_OK = (() => {
+  const c = document.createElement("canvas");
+  c.width = c.height = 1;
+  const x = c.getContext("2d");
+  if (!("filter" in x)) return false;
+  x.filter = "grayscale(1)";
+  x.fillStyle = "#ff0000";
+  x.fillRect(0, 0, 1, 1);
+  const [r, g] = x.getImageData(0, 0, 1, 1).data;
+  return Math.abs(r - g) < 20;   // 變成灰色的話，紅和綠會差不多
+})();
 
 // 「鏡頭」目前對準的位置（比例座標），會慢慢追向人的身體中心
 let cam = { x: 0.5, y: 0.5 };
@@ -454,9 +516,10 @@ function renderPreview() {
   cx = Math.max(0, Math.min(vw - cw, cx));
   cy = Math.max(0, Math.min(vh - ch, cy));
 
-  pctx.filter = filterString();   // 套上濾鏡
+  if (CANVAS_FILTER_OK) pctx.filter = filterString();   // Chrome：直接用瀏覽器的濾鏡
   pctx.drawImage(video, cx, cy, cw, ch, 0, 0, preview.width, preview.height);
   pctx.filter = "none";
+  if (!CANVAS_FILTER_OK) applyFilterByPixels();   // 【新增】Safari：自己算
   applyColorShift();   // 最後再調色溫、色調
 }
 
@@ -566,6 +629,39 @@ function seekTo(t) {
   });
 }
 
+function start0() { return picked ? picked.time : 0; }
+
+// 【新增】用開源套件 mp4box.js（GitHub: gpac/mp4box.js）讀出原影片裡的 AAC 聲音
+async function readOriginalAAC(file) {
+  const mod = await import("https://cdn.jsdelivr.net/npm/mp4box@0.5.2/+esm");
+  const MP4Box = mod.createFile ? mod : mod.default;
+  const buf = await file.arrayBuffer();
+  const mp4 = MP4Box.createFile();
+  let track = null;
+  const samples = [];
+  mp4.onReady = info => {
+    track = info.audioTracks[0];
+    if (!track || !track.codec.startsWith("mp4a")) { track = null; return; }
+    mp4.setExtractionOptions(track.id, null, { nbSamples: 1000 });
+    mp4.start();
+  };
+  mp4.onSamples = (id, user, list) => samples.push(...list);
+  buf.fileStart = 0;
+  mp4.appendBuffer(buf);
+  mp4.flush();
+  if (!track || samples.length === 0) return null;
+  const sampleRate = track.audio.sample_rate, numberOfChannels = track.audio.channel_count;
+  // 解碼需要的設定資料（AudioSpecificConfig）：檔案裡有就用，沒有就依取樣率和聲道自己組
+  const entry = mp4.getTrackById(track.id).mdia.minf.stbl.stsd.entries[0];
+  let description = entry?.esds?.esd?.descs?.[0]?.descs?.[0]?.data;
+  if (!description) {
+    const rates = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350];
+    const idx = Math.max(0, rates.indexOf(sampleRate));
+    description = new Uint8Array([(2 << 3) | (idx >> 1), ((idx & 1) << 7) | (numberOfChannels << 3)]);
+  }
+  return { sampleRate, numberOfChannels, description, samples };
+}
+
 // 找瀏覽器支援的 H.264 設定（剪映、Wink 都讀得了）
 async function pickVideoConfig(w, h) {
   for (const codec of ["avc1.640028", "avc1.4d0028", "avc1.42e028"]) {
@@ -598,14 +694,24 @@ document.getElementById("exportBtn").addEventListener("click", async () => {
     const cfg = { codec: "mp4a.40.2", sampleRate: audioBuf.sampleRate,
                   numberOfChannels: Math.min(2, audioBuf.numberOfChannels), bitrate: 128_000 };
     if ((await AudioEncoder.isConfigSupported(cfg)).supported) acfg = cfg;
-  } catch (err) { console.warn("讀不到聲音", err); }
+  } catch (err) { console.warn("無法重新編碼聲音", err); }
+
+  // 【新增】Safari 沒有聲音編碼器時：直接把原影片裡已經編好的 AAC 聲音搬過來，不重新編碼
+  let aacCopy = null;
+  if (!acfg) {
+    try { aacCopy = await readOriginalAAC(currentFile, start0()); }
+    catch (err) { console.warn("無法直接複製原本的聲音", err); }
+  }
 
   // 2. 準備 mp4 封裝器（開源套件 mp4-muxer）和影片編碼器
   const muxer = new Muxer({
     target: new ArrayBufferTarget(),
     video: { codec: "avc", width: W, height: H },
-    audio: acfg ? { codec: "aac", sampleRate: acfg.sampleRate, numberOfChannels: acfg.numberOfChannels } : undefined,
+    audio: acfg ? { codec: "aac", sampleRate: acfg.sampleRate, numberOfChannels: acfg.numberOfChannels }
+         : aacCopy ? { codec: "aac", sampleRate: aacCopy.sampleRate, numberOfChannels: aacCopy.numberOfChannels }
+         : undefined,
     fastStart: "in-memory",
+    firstTimestampBehavior: "offset",   // 聲音的第一格如果不是剛好從 0 開始，自動對齊
   });
   const venc = new VideoEncoder({
     output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
@@ -652,6 +758,19 @@ document.getElementById("exportBtn").addEventListener("click", async () => {
       ad.close();
     }
     await aenc.flush();
+  } else if (aacCopy) {
+    // 【新增】搬原本的聲音：只留選人時間點之後、影片長度以內的片段，時間改成從 0 開始
+    const end = start + total / FPS;
+    let first = true;
+    for (const smp of aacCopy.samples) {
+      const t = smp.cts / smp.timescale;
+      if (t < start || t >= end) continue;
+      const meta = first ? { decoderConfig: { codec: "mp4a.40.2", sampleRate: aacCopy.sampleRate,
+                                              numberOfChannels: aacCopy.numberOfChannels, description: aacCopy.description } } : undefined;
+      muxer.addAudioChunkRaw(new Uint8Array(smp.data), "key", Math.round((t - start) * 1e6),
+                             Math.round(smp.duration / smp.timescale * 1e6), meta);
+      first = false;
+    }
   }
 
   // 5. 封裝成 mp4，產生下載連結
@@ -661,7 +780,7 @@ document.getElementById("exportBtn").addEventListener("click", async () => {
   link.href = URL.createObjectURL(blob);
   link.download = "置中影片.mp4";
   link.hidden = false;
-  status.textContent = acfg ? "輸出完成！" : "輸出完成（這支影片的聲音讀不到，輸出的是無聲版本）";
+  status.textContent = (acfg || aacCopy) ? "輸出完成！" : "輸出完成（這支影片的聲音讀不到，輸出的是無聲版本）";
   exporting = false;
   document.body.classList.remove("exporting");
   setStep(5);

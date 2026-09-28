@@ -73,7 +73,7 @@
   .toolbar { display: none; align-items: center; gap: 10px; padding-left: 20px; border-left: 2px dotted var(--ink); }   /* 用點點線和步驟分開 */
   body.has-video .toolbar { display: flex; }
   .toolbar #fileName { margin-left: 6px; color: var(--muted); font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  aside { grid-column: 3; }
+  aside { grid-column: 3; grid-row: 1 / span 3; }   /* 設定面板在右邊，從最上面排到最下面 */
 
   /* 兩張小卡：同樣的白框、黑邊、硬陰影、下方標籤 */
   .frame {
@@ -88,7 +88,7 @@
   }
   .frame figcaption b { font-family: "Anton", sans-serif; font-weight: 400; font-size: 16px; letter-spacing: .02em; }
   /* 兩邊的畫面用同一個最大高度，大小就會一樣 */
-  .frame video, .frame #preview { display: block; width: auto; height: auto; max-width: 100%; max-height: max(420px, calc(100vh - 250px));   /* 讓整張小卡在一個畫面內看得完 */ border-radius: 8px; background: #111; }
+  .frame video, .frame #preview { display: block; width: auto; height: auto; max-width: 100%; max-height: max(380px, calc(100vh - 320px));   /* 讓整張小卡在一個畫面內看得完 */ border-radius: 8px; background: #111; }
 
   /* 還沒選影片時：拖放區 */
   #dropzone {
@@ -110,10 +110,35 @@
 
   /* 原始畫面 */
   /* 原始畫面也跟著影片大小，和右邊的小卡一樣不留黑邊 */
-  #stage { position: relative; border-radius: 8px; overflow: hidden; }
-  #stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
-  #stage.picking canvas { pointer-events: auto; cursor: crosshair; }
-  #stage.picking { box-shadow: var(--shadow); outline: 3px dashed var(--ink); outline-offset: 4px; }
+  #stage { position: relative; border-radius: 8px; overflow: hidden; width: fit-content; max-width: 100%; margin: 0 auto; }   /* 框框貼齊影片，骨架才不會被拉歪 */
+  /* 隨時都可以直接點畫面裡的人 */
+  #stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; cursor: pointer; z-index: 2; touch-action: manipulation; }
+  .pick-hint { font-size: 13px; color: var(--muted); }
+
+  /* 播放列 */
+  .playbar {
+    grid-column: 1 / 3; display: none; align-items: center; gap: 12px;
+    background: var(--paper); border: 2px solid var(--ink); border-radius: 999px; padding: 6px 14px 6px 6px;
+    box-shadow: var(--shadow); font-variant-numeric: tabular-nums; font-size: 14px;
+  }
+  body.has-video .playbar { display: flex; }
+  .playbar #scrub { flex: 1; min-width: 60px; }
+  .btn.round { width: 40px; height: 40px; padding: 0; border-radius: 50%; font-size: 15px; flex: none; }
+  #exportMini { display: none; }
+
+  /* 手機切換畫面的按鈕（電腦上不需要） */
+  .viewtabs { display: none; }
+
+  /* 設定分區可以收合 */
+  details.sec > summary {
+    list-style: none; cursor: pointer; font-weight: 900; font-size: 15px;
+    display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;
+  }
+  details.sec > summary::-webkit-details-marker { display: none; }
+  details.sec > summary::after { content: "−"; font-size: 18px; }
+  details.sec:not([open]) > summary::after { content: "+"; }
+  details.sec:not([open]) > summary { margin-bottom: 0; }
+  aside details.sec { padding: 14px 0; border-bottom: 2px dotted var(--ink); }
 
 
   /* ===== 右側設定面板 ===== */
@@ -198,6 +223,27 @@
     .toolbar { flex-wrap: wrap; }
     #dropzone { grid-column: 1; }
       .wordmark { font-size: 38px; }
+    /* 手機上兩張小卡上下排，各自矮一點，不用滑很久 */
+    .frame video, .frame #preview { max-height: 52vh; }
+    .frame { width: 100%; }
+    .frame video, .frame #preview { margin: 0 auto; }
+    .steps li { font-size: 13px; }
+    .toolbar { border-left: 0; padding-left: 0; }   /* 手機上換行時不需要分隔線 */
+    /* 手機版面：一次只看一個畫面、播放列固定在最下面、步驟列橫向捲動 */
+    header { flex-wrap: wrap; padding-top: 14px; }
+    #status { white-space: normal; font-size: 13px; width: 100%; border-radius: 12px; }
+    .steps { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 4px; }
+    .steps li { white-space: nowrap; }
+    .pick-hint { width: 100%; }
+    body.has-video .viewtabs {
+      display: flex; grid-column: 1; border: 2px solid var(--ink); border-radius: 999px; overflow: hidden; background: var(--paper);
+    }
+    .viewtabs button { flex: 1; border: 0; background: none; padding: 8px; font-weight: 700; cursor: pointer; }
+    .viewtabs button.on { background: var(--ink); color: var(--paper); }
+    body[data-view="source"] .frame.result, body[data-view="result"] .frame.source { display: none; }
+    .playbar { grid-column: 1; position: sticky; bottom: 10px; z-index: 10; }
+    #exportMini { display: inline-flex; flex: none; }
+    #timeDur { display: none; }
   }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 </style>
@@ -221,9 +267,9 @@
       <li><span>4</span>輸出</li>
     </ol>
     <div class="toolbar">
-      <button id="pickBtn" class="btn">點選要追蹤的人</button>
       <label for="picker" class="btn">換一支影片</label>
       <span id="fileName"></span>
+      <span id="pickHint" class="pick-hint">暫停後，點一下畫面裡的人就能選他</span>
     </div>
   </div>
 
@@ -237,10 +283,16 @@
     </label>
     <input type="file" id="picker" accept="video/*" hidden>
 
+    <!-- 手機上一次只看一個畫面，用這兩顆按鈕切換 -->
+    <div class="viewtabs">
+      <button data-view="source" class="on">原始畫面</button>
+      <button data-view="result">置中預覽</button>
+    </div>
+
     <!-- 原始畫面 -->
     <figure class="frame source">
       <div id="stage">
-        <video id="video" controls playsinline></video>
+        <video id="video" playsinline></video>
         <canvas id="overlay"></canvas>
       </div>
       <figcaption><span>原始畫面</span><b>ME</b></figcaption>
@@ -251,10 +303,19 @@
       <figcaption><span>置中預覽</span><b>&lt;333*</b></figcaption>
     </figure>
 
+    <!-- 自己的播放列：播放／暫停、時間軸（手機上會固定在畫面最下面） -->
+    <div class="playbar">
+      <button id="playBtn" class="btn primary round" aria-label="播放">▶</button>
+      <span id="timeNow">0:00.0</span>
+      <input type="range" id="scrub" min="0" max="1" step="0.001" value="0" aria-label="時間軸">
+      <span id="timeDur">0:00.0</span>
+      <button id="exportMini" class="btn primary">輸出</button>
+    </div>
+
     <!-- 設定面板 -->
     <aside>
-      <section>
-        <h3>畫面比例</h3>
+      <details class="sec" open>
+        <summary>畫面比例</summary>
         <!-- 選輸出的裁切比例 -->
         <div class="chips">
           <input type="radio" name="ratio" id="r-orig" value="orig" checked><label for="r-orig">原比例</label>
@@ -262,10 +323,10 @@
           <input type="radio" name="ratio" id="r-11" value="1"><label for="r-11">1:1</label>
           <input type="radio" name="ratio" id="r-34" value="0.75"><label for="r-34">3:4</label>
         </div>
-      </section>
+      </details>
 
-      <section>
-        <h3>追蹤</h3>
+      <details class="sec" open>
+        <summary>追蹤</summary>
         <!-- 最多偵測幾個人 -->
         <!-- 準確模式 -->
         <label class="check"><input type="checkbox" id="accurate"> 準確模式（骨架比較穩，但比較慢）</label>
@@ -278,20 +339,18 @@
         <div class="row"><label for="follow">跟隨速度</label><output id="followVal">0.08</output>
           <input type="range" id="follow" min="0.02" max="0.5" step="0.01" value="0.08"></div>
         <label class="check"><input type="checkbox" id="followY" checked> 上下也跟隨</label>
-      </section>
+      </details>
 
       <!-- 手動關鍵影格 -->
-      <section>
-        <div class="pane-head" style="min-height:0; margin-bottom:4px">
-          <h3 style="margin:0">手動關鍵影格</h3>
-          <button id="addKey" class="btn small">＋ 加在這裡</button>
-        </div>
-        <p class="hint-line">人物還沒出現或跟丟的片段，畫面會照這裡的關鍵影格移動，沒有關鍵影格就停在原地。暫停後在預覽畫面上拖曳，調好位置再按「加在這裡」</p>
+      <details class="sec" open>
+        <summary>手動關鍵影格</summary>
+        <button id="addKey" class="btn small" style="margin-bottom:8px">＋ 在目前時間加一個</button>
+        <p class="hint-line">人物還沒出現或跟丟的片段，畫面會照這裡的關鍵影格移動，沒有關鍵影格就停在原地。暫停後在預覽畫面上拖曳，調好位置再按上面的按鈕</p>
         <div id="keyList" class="keys"></div>
-      </section>
+      </details>
 
-      <section>
-        <h3>濾鏡</h3>
+      <details class="sec" open>
+        <summary>濾鏡</summary>
         <div class="chips">
           <input type="radio" name="filter" id="f-none" value="none" checked><label for="f-none"><i style="background:#D9D4E6"></i>原色</label>
           <input type="radio" name="filter" id="f-fresh" value="fresh"><label for="f-fresh"><i style="background:#7FDCC2"></i>清新</label>
@@ -303,13 +362,11 @@
         <div class="row"><label for="filterAmt">濾鏡強度</label><output id="filterAmtVal">0.7</output>
           <input type="range" id="filterAmt" min="0" max="1" step="0.05" value="0.7"></div>
         <span id="filterWarn"></span>
-      </section>
+      </details>
 
-      <section>
-        <div class="pane-head" style="min-height:0; margin-bottom:4px">
-          <h3 style="margin:0">調整</h3>
-          <button id="resetAdj" class="btn small">重設</button>
-        </div>
+      <details class="sec" open>
+        <summary>調整</summary>
+        <button id="resetAdj" class="btn small" style="margin-bottom:6px">全部重設</button>
         <div class="row"><label for="adjExposure">曝光</label><output id="adjExposureVal">0</output>
           <input type="range" class="bipolar" id="adjExposure" min="-1" max="1" step="0.05" value="0"></div>
         <div class="row"><label for="adjContrast">對比</label><output id="adjContrastVal">0</output>
@@ -318,9 +375,9 @@
           <input type="range" class="bipolar" id="adjTemp" min="-1" max="1" step="0.05" value="0"></div>
         <div class="row"><label for="adjTint">色調</label><output id="adjTintVal">0</output>
           <input type="range" class="bipolar" id="adjTint" min="-1" max="1" step="0.05" value="0"></div>
-      </section>
+      </details>
 
-      <section>
+      <section class="export-sec">
         <button id="exportBtn" class="btn primary big">輸出影片</button>
         <div class="progress"><div id="progressBar"></div></div>
         <a id="download" class="btn" hidden>下載置中影片</a>
@@ -349,12 +406,19 @@ const MODELS = {
   lite: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
   full: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task",
 };
-function createPose(kind, numPoses) {
-  return PoseLandmarker.createFromOptions(vision, {
-    baseOptions: { modelAssetPath: MODELS[kind], delegate: "GPU" },   // 用顯示卡來跑偵測，比較快
+// 判斷是不是手機（用手指操作的裝置），手機上會自動用比較省力的設定
+const IS_MOBILE = matchMedia("(pointer: coarse)").matches || innerWidth < 700;
+const MAX_SIDE = IS_MOBILE ? 1280 : 1920;   // 處理和輸出畫面的長邊上限（手機用 720p 左右）
+
+async function createPose(kind, numPoses) {
+  const make = delegate => PoseLandmarker.createFromOptions(vision, {
+    baseOptions: { modelAssetPath: MODELS[kind], delegate },
     runningMode: "VIDEO",
-    numPoses,   // 最多同時偵測幾個人，可以在設定裡改
+    numPoses,   // 最多同時偵測幾個人
   });
+  // 先用顯示卡（比較快），有些手機不支援的話改用 CPU
+  try { return await make("GPU"); }
+  catch (err) { console.warn("GPU 不能用，改用 CPU", err); return make("CPU"); }
 }
 // 目前先專注在人數不多的影片（最多同時偵測 3 人），多人團體影片之後再優化
 const MAX_PEOPLE = 3;
@@ -373,7 +437,8 @@ function loadFile(file) {
   document.getElementById("fileName").textContent = file.name;
   document.getElementById("download").hidden = true;
   setStep(2);
-  status.textContent = "暫停在看得到那個人的畫面，按「點選要追蹤的人」";
+  status.textContent = "播放或拖動下方時間軸，找到看得到那個人的畫面，暫停後點他";
+  setView("source");
 }
 document.getElementById("picker").addEventListener("change", e => loadFile(e.target.files[0]));
 const drop = document.getElementById("dropzone");
@@ -390,12 +455,13 @@ function setStep(n) {
 }
 
 video.addEventListener("loadedmetadata", () => {
-  // iPhone 常拍 4K，每格都處理 4K 太吃力；長邊最多縮到 1920（也就是 1080p）
-  const scale = Math.min(1, 1920 / Math.max(video.videoWidth, video.videoHeight));
+  // iPhone 常拍 4K，每格都處理 4K 太吃力；長邊最多縮到 1920（手機 1280）
+  const scale = Math.min(1, MAX_SIDE / Math.max(video.videoWidth, video.videoHeight));
   // H.264 要求寬高是偶數
   const w = Math.round(video.videoWidth * scale / 2) * 2, h = Math.round(video.videoHeight * scale / 2) * 2;
   canvas.width = w;  canvas.height = h;
-  setOutputSize();   // 輸出畫面的大小改由「畫面比例」決定
+  setOutputSize();
+  if (video.currentTime === 0) video.currentTime = 0.001;   // iPhone 上要跳一下，才會顯示第一格畫面   // 輸出畫面的大小改由「畫面比例」決定
   cam = { x: 0.5, y: 0.5 };
 });
 
@@ -417,7 +483,7 @@ function baseCrop() {
 function setOutputSize() {
   if (!video.videoWidth) return;
   const b = baseCrop();
-  const scale = Math.min(1, 1920 / Math.max(b.w, b.h));
+  const scale = Math.min(1, MAX_SIDE / Math.max(b.w, b.h));
   preview.width = Math.round(b.w * scale / 2) * 2;
   preview.height = Math.round(b.h * scale / 2) * 2;
 }
@@ -723,7 +789,11 @@ function renderPreview() {
   if (CANVAS_FILTER_OK) pctx.filter = filterString();   // Chrome：直接用瀏覽器的濾鏡
   pctx.drawImage(video, cx, cy, cw, ch, 0, 0, preview.width, preview.height);
   pctx.filter = "none";
-  if (!CANVAS_FILTER_OK) applyFilterByPixels();   // Safari：自己算
+  if (!CANVAS_FILTER_OK) {
+    // Safari：預覽時用 CSS 濾鏡（很快，只改變顯示），輸出時才一個一個像素算
+    if (exporting) applyFilterByPixels();
+    else preview.style.filter = filterString();
+  }
   applyColorShift();   // 最後再調色溫、色調
 }
 
@@ -894,6 +964,10 @@ function draw() {
     ctx.arc(target.x * canvas.width, target.y * canvas.height, 12, 0, Math.PI * 2);
     ctx.fill();
     ctx.stroke();
+  }
+  if (video.paused && !exporting) drawPickBoxes(idx);   // 暫停時顯示可以點的框框
+  if (idx >= 0) {
+    // （上面已經更新過位置）
   } else if (target && allowTrack) {
     lostCount++;
     target.vx = 0; target.vy = 0;   // 找不到時停在最後看到的位置，等他在附近重新出現
@@ -906,27 +980,58 @@ function draw() {
   }
 }
 
-// 選人：按按鈕進入選人模式，點畫面上的人
-document.getElementById("pickBtn").addEventListener("click", () => {
-  video.pause();
-  detect();
-  target = null;
-  draw();
-  stage.classList.add("picking");
-  status.textContent = "在左邊畫面點一下想追蹤的人";
-});
+// 一個人的框框：所有關節的最左、最右、最上、最下，再往外擴一點
+function personBox(lm) {
+  const xs = lm.map(p => p.x), ys = lm.map(p => p.y);
+  let x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+  const px = (x1 - x0) * 0.12, py = (y1 - y0) * 0.06;
+  return { x0: x0 - px, x1: x1 + px, y0: y0 - py, y1: y1 + py };
+}
 
+// 暫停時，在每個人身上畫框框和標籤，讓人一看就知道可以點
+function drawPickBoxes(trackedIdx) {
+  const W = canvas.width, H = canvas.height, fs = Math.round(W * 0.04);
+  ctx.save();
+  ctx.font = `700 ${fs}px "Noto Sans TC", sans-serif`;
+  people.forEach((lm, i) => {
+    const b = personBox(lm), on = i === trackedIdx;
+    ctx.setLineDash(on ? [] : [fs * 0.5, fs * 0.35]);
+    ctx.lineWidth = Math.max(2, W * 0.006);
+    ctx.strokeStyle = "#FFFFFF";
+    ctx.strokeRect(b.x0 * W, b.y0 * H, (b.x1 - b.x0) * W, (b.y1 - b.y0) * H);
+    const label = on ? "追蹤中" : "點我";
+    const tw = ctx.measureText(label).width + fs;
+    ctx.fillStyle = on ? "#FFFFFF" : "#111111";
+    ctx.fillRect(b.x0 * W, b.y0 * H - fs * 1.5, tw, fs * 1.5);
+    ctx.fillStyle = on ? "#111111" : "#FFFFFF";
+    ctx.fillText(label, b.x0 * W + fs / 2, b.y0 * H - fs * 0.4);
+  });
+  ctx.restore();
+}
+
+// 直接點原始畫面裡的人就能選他（不用先按按鈕）
 canvas.addEventListener("click", (e) => {
+  if (!video.videoWidth || exporting) return;
+  if (!video.paused) video.pause();   // 播放中點一下：先暫停
+  detect();
   const rect = canvas.getBoundingClientRect();
   const click = { x: (e.clientX - rect.left) / rect.width,
                   y: (e.clientY - rect.top) / rect.height };
-  // 選離點擊位置最近的人
-  let best = null, bestD = Infinity;
-  people.forEach((lm) => {
+  // 找被點到的人：點在他的框框裡；框框重疊時選身體中心比較近的
+  let hit = -1, bestD = Infinity;
+  people.forEach((lm, i) => {
+    const b = personBox(lm);
+    const inside = click.x >= b.x0 && click.x <= b.x1 && click.y >= b.y0 && click.y <= b.y1;
     const d = dist(bodyCenter(lm), click);
-    if (d < bestD) { bestD = d; best = makeTarget(lm); }   // 記住位置和身體大小
+    if (inside && d < bestD) { bestD = d; hit = i; }
   });
-  if (best) {
+  if (hit < 0) {
+    status.textContent = people.length ? "點在框框裡的人身上就能選他" : "這一格沒有偵測到人，換一個看得到全身的畫面再試";
+    draw();
+    return;
+  }
+  const best = makeTarget(people[hit]);   // 記住位置、身體大小、衣服顏色
+  {
     // 加入一筆選人紀錄（同一個時間點就覆蓋），之後的片段就鎖定這個人
     const t = video.currentTime;
     picks = picks.filter(p => Math.abs(p.time - t) > 0.05);
@@ -936,11 +1041,11 @@ canvas.addEventListener("click", (e) => {
     syncPick(t);
     cam = { x: best.x, y: best.y };   // 選好人時鏡頭直接對準，不用慢慢滑過去
     renderKeys();
-    stage.classList.remove("picking");
-    status.textContent = "選好了，播放看看預覽";
+    status.textContent = IS_MOBILE ? "選好了！可以切到「置中預覽」看看" : "選好了，播放看看右邊的預覽";
     setStep(3);
     draw();
     renderPreview();
+    if (IS_MOBILE) setTimeout(() => setView("result"), 700);   // 手機上自動切到預覽
   }
 });
 
@@ -1035,6 +1140,7 @@ document.getElementById("exportBtn").addEventListener("click", async () => {
   if (exporting) return;
   if (!("VideoEncoder" in window)) { status.textContent = "這個瀏覽器不支援逐格輸出，請用新版 Chrome"; return; }
   exporting = true;
+  preview.style.filter = "none";   // 輸出時濾鏡直接算進畫面，顯示上就不要再套一次
   video.pause();
   setStep(4);
   document.body.classList.add("exporting");
@@ -1153,7 +1259,7 @@ document.getElementById("exportBtn").addEventListener("click", async () => {
 
 // 每一格影片畫面都更新預覽，但偵測姿勢比較花時間，每隔幾格才做一次
 // 反正鏡頭本來就會平滑移動，不用每一格都知道人在哪裡
-const DETECT_EVERY = 2;   // 每 2 格偵測一次；還是卡的話可以改成 3
+const DETECT_EVERY = IS_MOBILE ? 4 : 2;   // 電腦每 2 格偵測一次，手機每 4 格
 let frameCount = 0;
 function onVideoFrame() {
   if (exporting) { video.requestVideoFrameCallback(onVideoFrame); return; }   // 輸出中交給逐格流程處理
@@ -1167,7 +1273,40 @@ function onVideoFrame() {
   video.requestVideoFrameCallback(onVideoFrame);   // 等下一格影片畫面出現再呼叫
 }
 video.requestVideoFrameCallback(onVideoFrame);
-renderKeys();   // 一開始先顯示「還沒有關鍵影格」
+renderKeys();
+
+// ===== 播放列 =====
+const playBtn = document.getElementById("playBtn");
+const scrub = document.getElementById("scrub");
+playBtn.onclick = () => { if (video.paused) video.play(); else video.pause(); };
+video.addEventListener("play", () => { playBtn.textContent = "❚❚"; playBtn.setAttribute("aria-label", "暫停"); });
+video.addEventListener("pause", () => {
+  playBtn.textContent = "▶"; playBtn.setAttribute("aria-label", "播放");
+  if (!exporting) { detect(); draw(); }   // 暫停時馬上偵測，顯示可以點的框框
+});
+video.addEventListener("seeked", () => { if (!exporting && video.paused) { detect(); draw(); } });
+function updateTimeUI() {
+  if (!video.duration) return;
+  document.getElementById("timeNow").textContent = fmtTime(video.currentTime);
+  if (document.activeElement !== scrub) scrub.value = video.currentTime / video.duration;
+}
+video.addEventListener("timeupdate", updateTimeUI);
+video.addEventListener("seeked", updateTimeUI);
+video.addEventListener("loadedmetadata", () => { document.getElementById("timeDur").textContent = fmtTime(video.duration); updateTimeUI(); });
+scrub.addEventListener("input", () => { if (video.duration) { video.pause(); video.currentTime = scrub.value * video.duration; } });
+document.getElementById("exportMini").onclick = () => document.getElementById("exportBtn").click();
+
+// ===== 手機上切換「原始畫面／置中預覽」 =====
+function setView(v) {
+  document.body.dataset.view = v;
+  document.querySelectorAll(".viewtabs button").forEach(b => b.classList.toggle("on", b.dataset.view === v));
+  if (v === "result") refreshIfPaused();
+}
+document.querySelectorAll(".viewtabs button").forEach(b => b.onclick = () => setView(b.dataset.view));
+setView("source");
+
+// 手機上設定分區預設只打開「畫面比例」，其他收起來，比較好滑
+if (IS_MOBILE) document.querySelectorAll("details.sec").forEach((d, i) => { if (i > 0) d.open = false; });   // 一開始先顯示「還沒有關鍵影格」
 </script>
 </body>
 </html>

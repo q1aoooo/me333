@@ -256,6 +256,10 @@
 
       <section>
         <h3>追蹤</h3>
+        <!-- 最多偵測幾個人 -->
+        <div class="row"><label for="maxPeople">最多偵測人數</label><output id="maxPeopleVal">8</output>
+          <input type="range" id="maxPeople" min="1" max="15" step="1" value="8"></div>
+        <p class="hint-line">人多的團體影片可以調高；人越多，偵測會越慢</p>
         <div class="row"><label for="zoom">放大倍率</label><output id="zoomVal">1.15</output>
           <input type="range" id="zoom" min="1" max="2" step="0.05" value="1.15"></div>
         <!-- 人在畫面裡偏上或偏下 -->
@@ -327,7 +331,7 @@ const pose = await PoseLandmarker.createFromOptions(vision, {
     delegate: "GPU",   // 用顯示卡來跑偵測，比較快
   },
   runningMode: "VIDEO",
-  numPoses: 3,   // 最多同時偵測 3 個人
+  numPoses: 8,   // 預設最多同時偵測 8 個人，可以在設定裡改
 });
 status.textContent = "準備好了";
 document.body.classList.add("ready");
@@ -499,6 +503,14 @@ document.getElementById("resetAdj").onclick = () => {
 document.querySelectorAll('input[name="filter"]').forEach(r => r.onchange = refreshIfPaused);
 // 換比例時，重新設定輸出大小並更新預覽
 document.querySelectorAll('input[name="ratio"]').forEach(r => r.onchange = () => { setOutputSize(); refreshIfPaused(); });
+
+// 改變最多偵測人數：直接更新偵測器的設定，暫停中的話馬上重新偵測一次
+const maxPeopleEl = document.getElementById("maxPeople");
+maxPeopleEl.addEventListener("input", () => { document.getElementById("maxPeopleVal").textContent = maxPeopleEl.value; });
+maxPeopleEl.addEventListener("change", async () => {
+  await pose.setOptions({ numPoses: parseInt(maxPeopleEl.value) });
+  if (video.paused && video.videoWidth) { detect(); draw(); }
+});
 
 // ===== 人物上下位置 =====
 const offsetEl = document.getElementById("offsetY");
